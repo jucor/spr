@@ -46,8 +46,16 @@ func (j *JjOps) FetchAndRebase(cfg *config.Config) error {
 
 // GetLocalCommitStack returns unmerged commits using jj log.
 // If any commits lack commit-id trailers, adds them via jj describe.
+// When MultiCommitPRs is enabled, uses the extended template that includes bookmarks.
 func (j *JjOps) GetLocalCommitStack(cfg *config.Config, gitcmd git.GitInterface) []git.Commit {
-	template := `commit_id ++ "\x1f" ++ change_id ++ "\x1f" ++ empty ++ "\x1f" ++ description ++ "\x1e"`
+	useExtended := cfg.Repo.MultiCommitPRs
+
+	var template string
+	if useExtended {
+		template = `commit_id ++ "\x1f" ++ change_id ++ "\x1f" ++ empty ++ "\x1f" ++ bookmarks ++ "\x1f" ++ description ++ "\x1e"`
+	} else {
+		template = `commit_id ++ "\x1f" ++ change_id ++ "\x1f" ++ empty ++ "\x1f" ++ description ++ "\x1e"`
+	}
 
 	var output string
 	err := j.jjcmd.JjArgs([]string{"log", "--no-graph", "--reversed", "--color=never", "-r", "trunk()..@", "-T", template}, &output)
@@ -55,7 +63,13 @@ func (j *JjOps) GetLocalCommitStack(cfg *config.Config, gitcmd git.GitInterface)
 		panic(err)
 	}
 
-	parsed, valid := parseJjLogOutput(output)
+	var parsed []parsedJjCommit
+	var valid bool
+	if useExtended {
+		parsed, valid = parseJjLogOutputExtended(output)
+	} else {
+		parsed, valid = parseJjLogOutput(output)
+	}
 
 	if !valid {
 		// Add commit-id trailers to commits that lack them
@@ -77,27 +91,38 @@ func (j *JjOps) GetLocalCommitStack(cfg *config.Config, gitcmd git.GitInterface)
 		if err != nil {
 			panic(err)
 		}
-		reparsed, revalid := parseJjLogOutput(output)
-		if !revalid {
+		if useExtended {
+			parsed, valid = parseJjLogOutputExtended(output)
+		} else {
+			parsed, valid = parseJjLogOutput(output)
+		}
+		if !valid {
 			panic("unable to add commit-id trailers via jj describe")
 		}
-		parsed = reparsed
 	}
 
 	// Convert to []git.Commit
 	var commits []git.Commit
 	for _, p := range parsed {
-		if p.wip {
-			// Include WIP commits but mark them (spr stops at first WIP)
-		}
-		commits = append(commits, git.Commit{
+		c := git.Commit{
 			CommitID:   p.sprCommitID,
 			CommitHash: p.commitHash,
 			ChangeID:   p.changeID,
 			Subject:    p.subject,
 			Body:       p.body,
 			WIP:        p.wip,
-		})
+		}
+		if useExtended {
+			// Filter out target branch from bookmarks
+			var filtered []string
+			for _, bm := range p.bookmarks {
+				if bm != cfg.Repo.GitHubBranch {
+					filtered = append(filtered, bm)
+				}
+			}
+			c.Branches = filtered
+		}
+		commits = append(commits, c)
 	}
 	return commits
 }

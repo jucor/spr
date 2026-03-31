@@ -31,6 +31,56 @@ func BranchNameFromCommit(cfg *config.Config, commit Commit) string {
 
 var BranchNameRegex = regexp.MustCompile(`spr/([a-zA-Z0-9_\-/\.]+)/([a-f0-9]{8})$`)
 
+// IsSPRBranch returns true if branchName is an spr-managed remote branch (e.g. "spr/main/abc12345").
+func IsSPRBranch(branchName string) bool {
+	return BranchNameRegex.MatchString(branchName)
+}
+
+// GetLocalBranchMap returns a map from commit hash to local branch names.
+// It filters out spr/* branches and remote tracking branches.
+func GetLocalBranchMap(gitcmd GitInterface) map[string][]string {
+	var output string
+	err := gitcmd.Git("for-each-ref --format=%(objectname) %(refname:short) refs/heads/", &output)
+	if err != nil {
+		return nil
+	}
+	result := make(map[string][]string)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		hash := parts[0]
+		branch := parts[1]
+		if IsSPRBranch(branch) {
+			continue
+		}
+		result[hash] = append(result[hash], branch)
+	}
+	return result
+}
+
+// AnnotateCommitsWithBranches populates the Branches field on each commit
+// using the given branch map. It excludes the target branch name.
+func AnnotateCommitsWithBranches(commits []Commit, branchMap map[string][]string, targetBranch string) {
+	if branchMap == nil {
+		return
+	}
+	for i := range commits {
+		branches := branchMap[commits[i].CommitHash]
+		var filtered []string
+		for _, b := range branches {
+			if b != targetBranch && !IsSPRBranch(b) {
+				filtered = append(filtered, b)
+			}
+		}
+		commits[i].Branches = filtered
+	}
+}
+
 // GetLocalTopCommit returns the top unmerged commit in the stack
 //
 // return nil if there are no unmerged commits in the stack

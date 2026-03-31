@@ -99,3 +99,57 @@ func TestParseJjLogOutput_MixedValidAndInvalid(t *testing.T) {
 	assert.Equal(t, "00000001", commits[0].sprCommitID)
 	assert.Equal(t, "", commits[1].sprCommitID)
 }
+
+// --- Extended template tests (with bookmarks) ---
+
+func TestParseJjLogOutputExtended_WithBookmarks(t *testing.T) {
+	// 5 fields: commit_id, change_id, empty, bookmarks, description
+	input := "c100000000000000000000000000000000000000\x1fchange1\x1ffalse\x1ffeature-a\x1fcommit 1\n\ncommit-id:00000001\n\x1e" +
+		"c200000000000000000000000000000000000000\x1fchange2\x1ffalse\x1f\x1fcommit 2\n\ncommit-id:00000002\n\x1e"
+	commits, valid := parseJjLogOutputExtended(input)
+	require.True(t, valid)
+	require.Len(t, commits, 2)
+	assert.Equal(t, []string{"feature-a"}, commits[0].bookmarks)
+	assert.Len(t, commits[1].bookmarks, 0)
+}
+
+func TestParseJjLogOutputExtended_MultipleBookmarks(t *testing.T) {
+	input := "c100000000000000000000000000000000000000\x1fchange1\x1ffalse\x1fbranch-a branch-b\x1fcommit 1\n\ncommit-id:00000001\n\x1e"
+	commits, valid := parseJjLogOutputExtended(input)
+	require.True(t, valid)
+	require.Len(t, commits, 1)
+	assert.Equal(t, []string{"branch-a", "branch-b"}, commits[0].bookmarks)
+}
+
+func TestParseJjLogOutputExtended_FiltersSPRBookmarks(t *testing.T) {
+	input := "c100000000000000000000000000000000000000\x1fchange1\x1ffalse\x1fspr/main/abc12345 real-branch\x1fcommit 1\n\ncommit-id:00000001\n\x1e"
+	commits, valid := parseJjLogOutputExtended(input)
+	require.True(t, valid)
+	require.Len(t, commits, 1)
+	assert.Equal(t, []string{"real-branch"}, commits[0].bookmarks)
+}
+
+func TestParseJjLogOutputExtended_DivergentBookmarkMarker(t *testing.T) {
+	// jj marks divergent bookmarks with trailing *
+	input := "c100000000000000000000000000000000000000\x1fchange1\x1ffalse\x1fmy-branch*\x1fcommit 1\n\ncommit-id:00000001\n\x1e"
+	commits, valid := parseJjLogOutputExtended(input)
+	require.True(t, valid)
+	require.Len(t, commits, 1)
+	assert.Equal(t, []string{"my-branch"}, commits[0].bookmarks)
+}
+
+func TestParseJjLogOutputExtended_NoBookmarks(t *testing.T) {
+	input := "c100000000000000000000000000000000000000\x1fchange1\x1ffalse\x1f\x1fcommit 1\n\ncommit-id:00000001\n\x1e"
+	commits, valid := parseJjLogOutputExtended(input)
+	require.True(t, valid)
+	require.Len(t, commits, 1)
+	assert.Len(t, commits[0].bookmarks, 0)
+}
+
+func TestParseJjLogOutputExtended_MissingCommitID(t *testing.T) {
+	input := "c100000000000000000000000000000000000000\x1fchange1\x1ffalse\x1fmy-branch\x1fcommit without trailer\n\x1e"
+	commits, valid := parseJjLogOutputExtended(input)
+	require.False(t, valid)
+	require.Len(t, commits, 1)
+	assert.Equal(t, []string{"my-branch"}, commits[0].bookmarks)
+}

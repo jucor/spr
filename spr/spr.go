@@ -266,7 +266,29 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 		return
 	}
 	sd.profiletimer.Step("UpdatePullRequests::FetchAndGetGitHubInfo")
-	localCommits := alignLocalCommits(sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd), githubInfo.PullRequests)
+
+	allLocalCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+
+	var localCommits []git.Commit
+	if sd.config.Repo.MultiCommitPRs {
+		groups, wipCommits := GroupCommitsIntoPRs(allLocalCommits, sd.config.Repo.GitHubBranch)
+		if len(groups) == 0 {
+			if len(wipCommits) > 0 {
+				fmt.Fprintf(sd.output, "warning: no local branches/bookmarks found in stack — create branches to define PR boundaries\n")
+				fmt.Fprintf(sd.output, "  (%d commit(s) treated as WIP)\n", len(wipCommits))
+			} else {
+				fmt.Fprintf(sd.output, "pull request stack is empty\n")
+			}
+			return
+		}
+		if len(wipCommits) > 0 {
+			fmt.Fprintf(sd.output, "note: %d commit(s) above last branch treated as WIP\n", len(wipCommits))
+		}
+		localCommits = TipCommits(groups)
+		githubInfo.GroupMap = BuildGroupMap(groups)
+	} else {
+		localCommits = alignLocalCommits(allLocalCommits, githubInfo.PullRequests)
+	}
 	sd.profiletimer.Step("UpdatePullRequests::GetLocalCommitStack")
 
 	// close prs for deleted commits
@@ -411,7 +433,15 @@ func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
 		return
 	}
 	sd.profiletimer.Step("MergePullRequests::Start")
-	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+	allLocalCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+
+	var localCommits []git.Commit
+	if sd.config.Repo.MultiCommitPRs {
+		groups, _ := GroupCommitsIntoPRs(allLocalCommits, sd.config.Repo.GitHubBranch)
+		localCommits = TipCommits(groups)
+	} else {
+		localCommits = allLocalCommits
+	}
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd, localCommits)
 	sd.profiletimer.Step("MergePullRequests::getGitHubInfo")
 
@@ -495,7 +525,15 @@ func (sd *stackediff) StatusPullRequests(ctx context.Context) {
 		return
 	}
 	sd.profiletimer.Step("StatusPullRequests::Start")
-	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+	allLocalCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+
+	var localCommits []git.Commit
+	if sd.config.Repo.MultiCommitPRs {
+		groups, _ := GroupCommitsIntoPRs(allLocalCommits, sd.config.Repo.GitHubBranch)
+		localCommits = TipCommits(groups)
+	} else {
+		localCommits = allLocalCommits
+	}
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd, localCommits)
 
 	if len(githubInfo.PullRequests) == 0 {

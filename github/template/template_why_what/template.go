@@ -17,6 +17,12 @@ func NewWhyWhatTemplatizer() *WhyWhatTemplatizer {
 }
 
 func (t *WhyWhatTemplatizer) Title(info *github.GitHubInfo, commit git.Commit) string {
+	if info.GroupMap != nil {
+		meta := template.ParsePRMetadata(commit.Body)
+		if meta.Title != "" {
+			return meta.Title
+		}
+	}
 	return commit.Subject
 }
 
