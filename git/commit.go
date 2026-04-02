@@ -32,4 +32,8 @@ type Commit struct {
 
 	// WIP is true if the commit is still work in progress.
 	WIP bool
+
+	// Branches holds local branch names (git) or bookmark names (jj) pointing at this commit.
+	// Only populated when MultiCommitPRs is enabled.
+	Branches []string
 }

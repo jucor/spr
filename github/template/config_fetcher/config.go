@@ -13,7 +13,7 @@ import (
 func PRTemplatizer(c *config.Config, gitcmd git.GitInterface) template.PRTemplatizer {
 	switch c.Repo.PRTemplateType {
 	case "stack":
-		return template_stack.NewStackTemplatizer(c.Repo.ShowPrTitlesInStack)
+		return template_stack.NewStackTemplatizer(c.Repo.ShowPrTitlesInStack, c.Repo.ConcatCommitMessages)
 	case "basic":
 		return template_basic.NewBasicTemplatizer()
 	case "why_what":

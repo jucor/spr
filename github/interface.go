@@ -39,6 +39,10 @@ type GitHubInfo struct {
 	RepositoryID string
 	LocalBranch  string
 	PullRequests []*PullRequest
+
+	// GroupMap maps tip commit-id to all commits in a multi-commit PR group.
+	// Nil when MultiCommitPRs is disabled (single-commit mode).
+	GroupMap map[string][]git.Commit
 }
 
 type RepoAssignee struct {

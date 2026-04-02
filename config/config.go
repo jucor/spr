@@ -39,6 +39,9 @@ type RepoConfig struct {
 
 	ForceFetchTags bool `default:"false" yaml:"forceFetchTags"`
 
+	MultiCommitPRs     bool `default:"false" yaml:"multiCommitPRs"`
+	ConcatCommitMessages bool `default:"true" yaml:"concatCommitMessages"`
+
 	ShowPrTitlesInStack    bool `default:"false" yaml:"showPrTitlesInStack"`
 	ShowStackNumberInTitle bool `default:"false" yaml:"showStackNumberInTitle"`
 	BranchPushIndividually bool `default:"false" yaml:"branchPushIndividually"`

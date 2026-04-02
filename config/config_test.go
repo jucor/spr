@@ -34,6 +34,7 @@ func TestDefaultConfig(t *testing.T) {
 			PRTemplatePath:        "",
 			PRTemplateInsertStart: "",
 			PRTemplateInsertEnd:   "",
+			ConcatCommitMessages:  true,
 			ShowPrTitlesInStack:   false,
 		},
 		User: &UserConfig{
