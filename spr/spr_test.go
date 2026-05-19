@@ -1297,3 +1297,550 @@ func TestStatusPullRequestsTextMode(t *testing.T) {
 	assert.Equal("https://github.com/testowner/testrepo/pull/1 : first PR", lines[1])
 	githubmock.ExpectationsMet()
 }
+
+// --- Edit command name tests ---
+
+// stubVcsOps is a minimal VCSOperations stub for testing user-facing messages.
+type stubVcsOps struct {
+	editing      bool
+	commandName  string
+	commits      []git.Commit
+	stackWarning string // returned by CheckStackCompleteness
+
+	// spy flags: set to true when the corresponding method is called.
+	editStartCalled  bool
+	editFinishCalled bool
+	editAbortCalled  bool
+	fetchCalled      bool
+
+	// injectable errors: returned by the corresponding method when non-nil.
+	editStartError  error
+	editFinishError error
+	editAbortError  error
+	fetchError      error
+}
+
+func (s *stubVcsOps) FetchAndRebase(cfg *config.Config) error { return nil }
+func (s *stubVcsOps) Fetch() error                            { s.fetchCalled = true; return s.fetchError }
+func (s *stubVcsOps) GetLocalCommitStack(cfg *config.Config, gitcmd git.GitInterface) []git.Commit {
+	return s.commits
+}
+func (s *stubVcsOps) AmendInto(commit git.Commit) error { return nil }
+func (s *stubVcsOps) EditStart(commit git.Commit) error {
+	s.editStartCalled = true
+	return s.editStartError
+}
+func (s *stubVcsOps) EditFinish() error { s.editFinishCalled = true; return s.editFinishError }
+func (s *stubVcsOps) EditAbort() error  { s.editAbortCalled = true; return s.editAbortError }
+func (s *stubVcsOps) PrepareForPush() (func(), error)            { return func() {}, nil }
+func (s *stubVcsOps) PushBranches(cfg *config.Config, commits []git.Commit, individually bool) error {
+	return nil
+}
+func (s *stubVcsOps) IsEditing() bool            { return s.editing }
+func (s *stubVcsOps) EditStatePath() string       { return "" }
+func (s *stubVcsOps) CheckStackCompleteness() string { return s.stackWarning }
+func (s *stubVcsOps) CommandName() string         { return s.commandName }
+
+func TestEditCommit_AlreadyEditing_UsesCommandName(t *testing.T) {
+	tests := []struct {
+		name        string
+		commandName string
+		wantPrefix  string
+	}{
+		{"jj mode", "jj spr", "jj spr"},
+		{"git mode", "git spr", "git spr"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.EmptyConfig()
+			cfg.Repo.GitHubBranch = "master"
+			gitmock := mockgit.NewMockGit(t)
+			githubmock := mockclient.NewMockClient(t)
+			githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+
+			stub := &stubVcsOps{editing: true, commandName: tt.commandName}
+			s := NewStackedPR(cfg, githubmock, gitmock, stub)
+			output := &bytes.Buffer{}
+			s.output = output
+
+			s.EditCommit(context.Background())
+
+			require.Contains(t, output.String(), tt.wantPrefix+" edit --done")
+			require.Contains(t, output.String(), tt.wantPrefix+" edit --abort")
+		})
+	}
+}
+
+// TestEditCommit_JjMode_AnnouncesAndRunsJjEdit pins the new jj-mode UX:
+// after the user picks a commit, spr announces what it is doing and
+// actually runs `jj edit <change-id>` via EditStart so @ moves to the
+// target commit. User then just modifies files.
+func TestEditCommit_JjMode_AnnouncesAndRunsJjEdit(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+
+	stub := &stubVcsOps{
+		editing:     false,
+		commandName: "jj spr",
+		commits: []git.Commit{
+			{
+				CommitID:   "00000001",
+				CommitHash: "c100000000000000000000000000000000000000",
+				ChangeID:   "jjchangeabc",
+				Subject:    "test commit",
+			},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	input := bytes.NewBufferString("1\n")
+	s.input = input
+
+	s.EditCommit(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "jj edit jjchangeabc", "announces the jj edit command being run")
+	require.Contains(t, out, "jj undo", "instructs how to revert")
+	require.NotContains(t, out, "jj spr edit --done", "no session flags in jj mode")
+	require.NotContains(t, out, "jj spr edit --abort", "no session flags in jj mode")
+	require.True(t, stub.editStartCalled, "EditStart MUST be called in jj mode to run jj edit")
+}
+
+// TestEditCommit_JjMode_EditError_PrintsErrorMessage pins error reporting:
+// if jj edit fails (e.g. commit is immutable), spr prints the error clearly
+// and exits without further output.
+func TestEditCommit_JjMode_EditError_PrintsErrorMessage(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+
+	stub := &stubVcsOps{
+		editing:        false,
+		commandName:    "jj spr",
+		editStartError: fmt.Errorf("commit is immutable"),
+		commits: []git.Commit{
+			{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000",
+				ChangeID: "jjchangeabc", Subject: "test commit"},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	input := bytes.NewBufferString("1\n")
+	s.input = input
+
+	s.EditCommit(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "immutable", "surfaces the jj error to the user")
+	require.NotContains(t, out, "jj undo", "no follow-up instructions when edit failed")
+}
+
+// TestEditCommit_GitMode_CallsEditStart pins that git mode's behavior is
+// unchanged: EditStart is called and the session-style instructions are
+// printed.
+func TestEditCommit_GitMode_CallsEditStart(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+
+	stub := &stubVcsOps{
+		editing:     false,
+		commandName: "git spr",
+		commits: []git.Commit{
+			{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit"},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	input := bytes.NewBufferString("1\n")
+	s.input = input
+
+	s.EditCommit(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "git spr edit --done")
+	require.Contains(t, out, "git spr edit --abort")
+	require.True(t, stub.editStartCalled, "EditStart must be called in git mode")
+}
+
+// --- SyncStack in jj mode ---
+//
+// SyncStack uses literal `git cherry-pick` and is broken under jj. In jj
+// mode it becomes echo-only: point the user at `jj git fetch` and skip the
+// dangerous git call.
+
+func TestSyncStack_JjMode_RunsJjGitFetch(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	// No mockgit expectations set — if SyncStack tries to run git cherry-pick,
+	// the mock will fail with "Unexpected command", proving the jj branch
+	// returned early.
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{commandName: "jj spr"}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.SyncStack(context.Background())
+
+	out := output.String()
+	require.True(t, stub.fetchCalled, "Fetch() must be called in jj mode")
+	require.Contains(t, out, "jj git fetch", "announces what it's running")
+	// "rebase onto trunk" is `spr update`'s job, not sync's — must NOT promise it
+	require.NotContains(t, out, "jj rebase")
+}
+
+func TestSyncStack_JjMode_FetchError_PrintsError(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{commandName: "jj spr", fetchError: fmt.Errorf("network is down")}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.SyncStack(context.Background())
+
+	require.Contains(t, output.String(), "network is down")
+}
+
+// --- EditCommitDone / EditCommitAbort in jj mode ---
+//
+// jj has no edit sessions. These flags become echo-only deprecations:
+// print instructions for the native jj equivalent (jj new / jj undo), and
+// do NOT call the VCS-layer methods.
+
+func TestEditCommitDone_JjMode_EchoOnly(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "jj spr", editing: true}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitDone(context.Background(), false)
+
+	out := output.String()
+	require.Contains(t, out, "jj new")
+	require.Contains(t, out, "jj undo")
+	require.False(t, stub.editFinishCalled, "EditFinish must NOT be called in jj mode")
+}
+
+func TestEditCommitAbort_JjMode_EchoOnly(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "jj spr", editing: true}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitAbort(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "jj undo")
+	require.False(t, stub.editAbortCalled, "EditAbort must NOT be called in jj mode")
+}
+
+func TestEditCommitDone_GitMode_EditFinishError(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{
+		commandName:     "git spr",
+		editing:         true,
+		editFinishError: fmt.Errorf("rebase --continue failed: conflict"),
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitDone(context.Background(), false)
+
+	out := output.String()
+	require.Contains(t, out, "Edit finish failed")
+	require.Contains(t, out, "rebase --continue failed")
+	require.Contains(t, out, "Resolve any issues")
+}
+
+func TestEditCommitAbort_GitMode_EditAbortError(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{
+		commandName:    "git spr",
+		editing:        true,
+		editAbortError: fmt.Errorf("rebase --abort failed: dirty working tree"),
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitAbort(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "Failed to abort")
+	require.Contains(t, out, "dirty working tree")
+	require.NotContains(t, out, "Edit session aborted", "must NOT report success after error")
+}
+
+func TestEditCommitDone_GitMode_NoSessionInProgress(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "git spr", editing: false}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitDone(context.Background(), false)
+
+	require.Contains(t, output.String(), "No edit session in progress")
+	require.False(t, stub.editFinishCalled)
+}
+
+func TestEditCommitAbort_GitMode_NoSessionInProgress(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "git spr", editing: false}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitAbort(context.Background())
+
+	require.Contains(t, output.String(), "No edit session in progress")
+	require.False(t, stub.editAbortCalled)
+}
+
+func TestEditCommitDone_GitMode_CallsEditFinish(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "git spr", editing: true}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitDone(context.Background(), false)
+
+	require.True(t, stub.editFinishCalled, "EditFinish must be called in git mode")
+}
+
+// --- MergePullRequests: MergeCheck gating ---
+//
+// When MergeCheck is configured, spr refuses to merge unless `spr check` has
+// been run successfully against the current top commit (or the user has
+// explicitly recorded "SKIP"). These tests pin all three branches.
+
+func makeMergeCheckTest(t *testing.T, lastCommitHash, checkedCommit string, found bool) (*stackediff, *bytes.Buffer, *mockclient.MockClient) {
+	t.Helper()
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	cfg.Repo.MergeCheck = "echo ok"
+	if found {
+		cfg.State.MergeCheckCommit = map[string]string{
+			"repo_master": checkedCommit, // key = RepositoryID + "_" + LocalBranch
+		}
+	}
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{
+		UserName:     "test",
+		RepositoryID: "repo",
+		LocalBranch:  "master",
+	}
+	stub := &stubVcsOps{
+		commandName: "git spr",
+		commits: []git.Commit{
+			{CommitID: "00000001", CommitHash: lastCommitHash, Subject: "the top"},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	return s, output, githubmock
+}
+
+func TestMergePullRequests_MergeCheckGate_NeverRun(t *testing.T) {
+	t.Setenv("SPR_DEBUG", "1") // make check() panic instead of os.Exit
+	s, _, githubmock := makeMergeCheckTest(t, "topHash", "", false)
+	githubmock.ExpectGetInfo()
+
+	require.PanicsWithError(t,
+		"need to run merge check 'spr check' before merging",
+		func() { s.MergePullRequests(context.Background(), nil) })
+}
+
+func TestMergePullRequests_MergeCheckGate_StaleHash(t *testing.T) {
+	t.Setenv("SPR_DEBUG", "1")
+	s, _, githubmock := makeMergeCheckTest(t, "currentTopHash", "oldHashFromBefore", true)
+	githubmock.ExpectGetInfo()
+
+	require.PanicsWithError(t,
+		"need to run merge check 'spr check' before merging",
+		func() { s.MergePullRequests(context.Background(), nil) })
+}
+
+func TestMergePullRequests_MergeCheckGate_ExplicitSkip(t *testing.T) {
+	t.Setenv("SPR_DEBUG", "1")
+	s, _, githubmock := makeMergeCheckTest(t, "topHash", "SKIP", true)
+	githubmock.ExpectGetInfo()
+
+	// With "SKIP" recorded, MergeCheck is bypassed. The flow continues
+	// past the gate and (because Info has no PRs) eventually hits the
+	// "no mergeable pull requests" path. The contract pinned here is
+	// that the FAILURE is the no-PR one, NOT the merge-check one.
+	require.PanicsWithError(t,
+		"no mergeable pull requests found in the stack",
+		func() { s.MergePullRequests(context.Background(), nil) })
+}
+
+// --- fetchAndGetGitHubInfo: refuse on spr-branch ---
+
+// If the user is checked out on a spr-pushed branch (e.g. spr/master/abcd1234),
+// spr.UpdatePullRequests must abort with a helpful message instead of
+// duplicating PRs against the remote PR branch.
+func TestUpdatePullRequests_OnSprBranch_RefusesAndBails(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{
+		UserName:     "test",
+		RepositoryID: "repo",
+		LocalBranch:  "spr/master/deadbeef", // matches BranchNameRegex
+	}
+	stub := &stubVcsOps{commandName: "git spr"}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	// Only GetInfo is expected — once spr sees we're on a spr branch, it
+	// returns nil from fetchAndGetGitHubInfo and aborts before any
+	// CreatePullRequest / UpdatePullRequest call.
+	githubmock.ExpectGetInfo()
+
+	s.UpdatePullRequests(context.Background(), nil, nil)
+
+	// The refusal message is printed via fmt.Printf (not sd.output), so
+	// we can't assert on it directly from the test — but we can confirm
+	// no further mock calls happened.
+	githubmock.ExpectationsMet()
+	_ = output
+}
+
+// --- checkStackUsable ---
+//
+// checkStackUsable replaces confirmIfIncompleteStack. It no longer prompts
+// the user — the only remaining failure case (multi-head ambiguity) has no
+// "continue anyway" answer that isn't disastrous, so we just print the
+// warning as an error and return false.
+
+func TestCheckStackUsable_NoWarning_ReturnsTrue(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{stackWarning: ""}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	ok := s.checkStackUsable()
+
+	require.True(t, ok)
+	require.Empty(t, output.String(), "no output when no warning")
+}
+
+func TestAmendCommit_StackUnusable_AbortsWithError(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{
+		stackWarning: "your stack is non-linear (2 heads above trunk): A, B",
+		commits: []git.Commit{
+			{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test"},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.AmendCommit(context.Background())
+
+	require.Contains(t, output.String(), "non-linear")
+	require.NotContains(t, output.String(), "Commit to amend",
+		"guard must fire before the commit-pick prompt")
+}
+
+func TestRunMergeCheck_StackUnusable_AbortsWithError(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	cfg.Repo.MergeCheck = "echo ok" // must be non-empty to reach the guard
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{
+		stackWarning: "your stack is non-linear (2 heads above trunk): A, B",
+		commits: []git.Commit{
+			{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test"},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.RunMergeCheck(context.Background())
+
+	require.Contains(t, output.String(), "non-linear")
+	require.NotContains(t, output.String(), "MergeCheck PASSED")
+	require.NotContains(t, output.String(), "MergeCheck FAILED")
+}
+
+func TestCheckStackUsable_Warning_PrintsErrorAndReturnsFalse(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{stackWarning: "your stack is non-linear (2 heads above trunk): A, B"}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	// No input set — if the function reads stdin, the test will hang or panic.
+	// The new behavior must NOT read stdin.
+
+	ok := s.checkStackUsable()
+
+	require.False(t, ok)
+	require.Contains(t, output.String(), "non-linear")
+	require.NotContains(t, output.String(), "Continue anyway", "no Y/N prompt anymore")
+}

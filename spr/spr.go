@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,14 +20,23 @@ import (
 	"github.com/ejoffe/spr/config/config_parser"
 	"github.com/ejoffe/spr/git"
 	"github.com/ejoffe/spr/github"
+	"github.com/ejoffe/spr/vcs"
 )
 
 // NewStackedPR constructs and returns a new stackediff instance.
-func NewStackedPR(config *config.Config, github github.GitHubInterface, gitcmd git.GitInterface) *stackediff {
+// If vcsOps is nil, a default git-based implementation is created.
+func NewStackedPR(config *config.Config, github github.GitHubInterface, gitcmd git.GitInterface, vcsOps ...vcs.VCSOperations) *stackediff {
+	var ops vcs.VCSOperations
+	if len(vcsOps) > 0 && vcsOps[0] != nil {
+		ops = vcsOps[0]
+	} else {
+		ops = vcs.NewGitOps(config, gitcmd)
+	}
 	return &stackediff{
 		config:       config,
 		github:       github,
 		gitcmd:       gitcmd,
+		vcsOps:       ops,
 		profiletimer: profiletimer.StartNoopTimer(),
 
 		output: os.Stdout,
@@ -40,6 +48,7 @@ type stackediff struct {
 	config        *config.Config
 	github        github.GitHubInterface
 	gitcmd        git.GitInterface
+	vcsOps        vcs.VCSOperations
 	profiletimer  profiletimer.Timer
 	DetailEnabled bool
 	TextEnabled   bool
@@ -49,11 +58,27 @@ type stackediff struct {
 	synchronized bool // When true code is executed without goroutines. Allows test to be deterministic
 }
 
+// checkStackUsable returns true if spr can safely operate on the current stack.
+// If the VCS reports a problem (e.g. multi-head ambiguity in jj mode), prints
+// the message as an error and returns false. There is no prompt — the failure
+// cases that survive auto-revset have no safe "continue anyway" answer.
+func (sd *stackediff) checkStackUsable() bool {
+	warning := sd.vcsOps.CheckStackCompleteness()
+	if warning == "" {
+		return true
+	}
+	fmt.Fprintf(sd.output, "error: %s\n", warning)
+	return false
+}
+
 // AmendCommit enables one to easily amend a commit in the middle of a stack
 //
 //	of commits. A list of commits is printed and one can be chosen to be amended.
 func (sd *stackediff) AmendCommit(ctx context.Context) {
-	localCommits := git.GetLocalCommitStack(sd.config, sd.gitcmd)
+	if !sd.checkStackUsable() {
+		return
+	}
+	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
 	if len(localCommits) == 0 {
 		fmt.Fprintf(sd.output, "No commits to amend\n")
 		return
@@ -80,35 +105,28 @@ func (sd *stackediff) AmendCommit(ctx context.Context) {
 	}
 	commitIndex = commitIndex - 1
 	check(err)
-	sd.gitcmd.MustGit("commit --fixup "+localCommits[commitIndex].CommitHash, nil)
-
-	rebaseCmd := fmt.Sprintf("rebase -i --autosquash --autostash %s/%s",
-		sd.config.Repo.GitHubRemote, sd.config.Repo.GitHubBranch)
-	sd.gitcmd.MustGit(rebaseCmd, nil)
-}
-
-func (sd *stackediff) editStatePath() string {
-	return filepath.Join(sd.gitcmd.RootDir(), ".git", "spr_edit_state")
+	err = sd.vcsOps.AmendInto(localCommits[commitIndex])
+	check(err)
 }
 
 func (sd *stackediff) isEditing() bool {
-	_, err := os.Stat(sd.editStatePath())
-	return err == nil
+	return sd.vcsOps.IsEditing()
 }
 
 // EditCommit starts an interactive edit session on a commit in the stack.
 //
 //	The user picks a commit, and the tool starts a rebase with an edit stop
-//	at that commit. The user can then edit files and run `git spr edit --done`
+//	at that commit. The user can then edit files and run `spr edit --done`
 //	to amend and restore the stack.
 func (sd *stackediff) EditCommit(ctx context.Context) {
 	if sd.isEditing() {
 		fmt.Fprintf(sd.output, "Already editing a commit.\n")
-		fmt.Fprintf(sd.output, "Run 'git spr edit --done' to finish or 'git spr edit --abort' to cancel.\n")
+		fmt.Fprintf(sd.output, "Run '%s edit --done' to finish or '%s edit --abort' to cancel.\n",
+			sd.vcsOps.CommandName(), sd.vcsOps.CommandName())
 		return
 	}
 
-	localCommits := git.GetLocalCommitStack(sd.config, sd.gitcmd)
+	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
 	if len(localCommits) == 0 {
 		fmt.Fprintf(sd.output, "No commits to edit\n")
 		return
@@ -137,83 +155,55 @@ func (sd *stackediff) EditCommit(ctx context.Context) {
 
 	targetCommit := localCommits[commitIndex]
 
-	// Write state file so --done knows we're in an edit session
-	stateContent := fmt.Sprintf("commit_id=%s\ncommit_subject=%s\n", targetCommit.CommitID, targetCommit.Subject)
-	err = os.WriteFile(sd.editStatePath(), []byte(stateContent), 0644)
-	check(err)
+	// jj mode: no session, no state file. Just announce + run `jj edit` to
+	// move @ to the target commit. Descendants auto-rebase, conflicts are
+	// first-class objects, jj undo handles revert — nothing else to do.
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "\nEditing commit %d (%s): running `jj edit %s`\n",
+			commitIndex+1, targetCommit.Subject, targetCommit.ChangeID)
+		err = sd.vcsOps.EditStart(targetCommit)
+		if err != nil {
+			fmt.Fprintf(sd.output, "error: %s\n", err)
+			return
+		}
+		fmt.Fprintf(sd.output, "To revert any changes: jj undo\n")
+		return
+	}
 
-	// Use the spr binary itself as the sequence editor to rewrite 'pick' to 'edit'
-	// for the target commit. Git invokes the editor as: <editor> <todo-file>
-	exe, err := os.Executable()
-	check(err)
-	editorCmd := fmt.Sprintf("%s _edit-sequence %s", exe, targetCommit.CommitHash[:7])
-
-	rebaseCmd := fmt.Sprintf("rebase -i --autostash %s/%s",
-		sd.config.Repo.GitHubRemote, sd.config.Repo.GitHubBranch)
-	err = sd.gitcmd.GitWithEditor(rebaseCmd, nil, editorCmd)
+	err = sd.vcsOps.EditStart(targetCommit)
 	if err != nil {
-		// Clean up state file on failure
-		os.Remove(sd.editStatePath())
 		fmt.Fprintf(sd.output, "Failed to start edit session: %s\n", err)
 		return
 	}
 
 	fmt.Fprintf(sd.output, "\nEditing commit %d: %s\n", commitIndex+1, targetCommit.Subject)
-	fmt.Fprintf(sd.output, "Make your changes, then run: git spr edit --done\n")
-	fmt.Fprintf(sd.output, "To cancel, run: git spr edit --abort\n")
+	fmt.Fprintf(sd.output, "Make your changes, then run: %s edit --done\n", sd.vcsOps.CommandName())
+	fmt.Fprintf(sd.output, "To cancel, run: %s edit --abort\n", sd.vcsOps.CommandName())
 }
 
 // EditCommitDone finishes an edit session by amending the current commit
 //
 //	and continuing the rebase to restore the full stack.
 func (sd *stackediff) EditCommitDone(ctx context.Context, update bool) {
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "jj does not track edit sessions. These flags are git-mode only.\n")
+		fmt.Fprintf(sd.output, "To return after editing: jj new <change-id>\n")
+		fmt.Fprintf(sd.output, "To revert changes:       jj undo\n")
+		return
+	}
+
 	if !sd.isEditing() {
 		fmt.Fprintf(sd.output, "No edit session in progress.\n")
 		return
 	}
 
-	// Stage modifications and deletions to tracked files only.
-	// Using -u instead of -A avoids accidentally staging untracked files.
-	sd.gitcmd.MustGit("add -u", nil)
-
-	// Check if we're resolving a rebase conflict or at the initial edit stop.
-	// Git creates .git/REBASE_HEAD when a rebase stops due to a conflict,
-	// but NOT when it stops at an 'edit' point.
-	rebaseHeadPath := filepath.Join(sd.gitcmd.RootDir(), ".git", "REBASE_HEAD")
-	_, rebaseHeadErr := os.Stat(rebaseHeadPath)
-	isConflictResolution := rebaseHeadErr == nil
-
-	if isConflictResolution {
-		// We're resolving a conflict that occurred while replaying commits
-		// above the edited commit. Just continue the rebase — git will
-		// create the proper commit from the staged conflict resolution.
-		// Do NOT amend here, as that would squash this commit's changes
-		// into the previous commit.
-		err := sd.gitcmd.Git("rebase --continue", nil)
-		if err != nil {
-			fmt.Fprintf(sd.output, "Rebase conflict detected. Resolve conflicts and run 'git spr edit --done' again.\n")
-			return
-		}
-	} else {
-		// We're at the initial edit stop. Amend the target commit with
-		// the user's changes, then continue the rebase to replay the
-		// remaining commits on top.
-		err := sd.gitcmd.Git("commit --amend --no-edit", nil)
-		if err != nil {
-			fmt.Fprintf(sd.output, "Failed to amend commit: %s\n", err)
-			fmt.Fprintf(sd.output, "Resolve any issues and try again.\n")
-			return
-		}
-
-		err = sd.gitcmd.Git("rebase --continue", nil)
-		if err != nil {
-			fmt.Fprintf(sd.output, "Rebase conflict detected. Resolve conflicts and run 'git spr edit --done' again.\n")
-			return
-		}
+	err := sd.vcsOps.EditFinish()
+	if err != nil {
+		fmt.Fprintf(sd.output, "Edit finish failed: %s\n", err)
+		fmt.Fprintf(sd.output, "Resolve any issues and try again.\n")
+		return
 	}
 
-	// Clean up state file
-	os.Remove(sd.editStatePath())
 	fmt.Fprintf(sd.output, "Stack restored successfully.\n")
 
 	if update {
@@ -223,18 +213,23 @@ func (sd *stackediff) EditCommitDone(ctx context.Context, update bool) {
 
 // EditCommitAbort aborts the current edit session and restores the original stack.
 func (sd *stackediff) EditCommitAbort(ctx context.Context) {
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "jj does not track edit sessions. These flags are git-mode only.\n")
+		fmt.Fprintf(sd.output, "To revert changes: jj undo\n")
+		return
+	}
+
 	if !sd.isEditing() {
 		fmt.Fprintf(sd.output, "No edit session in progress.\n")
 		return
 	}
 
-	err := sd.gitcmd.Git("rebase --abort", nil)
+	err := sd.vcsOps.EditAbort()
 	if err != nil {
 		fmt.Fprintf(sd.output, "Failed to abort: %s\n", err)
 		return
 	}
 
-	os.Remove(sd.editStatePath())
 	fmt.Fprintf(sd.output, "Edit session aborted.\n")
 }
 
@@ -287,6 +282,9 @@ func alignLocalCommits(commits []git.Commit, prs []*github.PullRequest) []git.Co
 //	In the case where commits are reordered, the corresponding pull requests
 //	 will also be reordered to match the commit stack order.
 func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string, count *uint) {
+	if !sd.checkStackUsable() {
+		return
+	}
 	sd.profiletimer.Step("UpdatePullRequests::Start")
 	reviewers = append(sd.config.Repo.DefaultReviewers, reviewers...)
 	githubInfo := sd.fetchAndGetGitHubInfo(ctx)
@@ -294,7 +292,7 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 		return
 	}
 	sd.profiletimer.Step("UpdatePullRequests::FetchAndGetGitHubInfo")
-	localCommits := alignLocalCommits(git.GetLocalCommitStack(sd.config, sd.gitcmd), githubInfo.PullRequests)
+	localCommits := alignLocalCommits(sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd), githubInfo.PullRequests)
 	sd.profiletimer.Step("UpdatePullRequests::GetLocalCommitStack")
 
 	// close prs for deleted commits
@@ -435,13 +433,16 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 //	We than close all the pull requests which are below the merged request, as
 //	their commits have already been merged.
 func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
+	if !sd.checkStackUsable() {
+		return
+	}
 	sd.profiletimer.Step("MergePullRequests::Start")
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 	sd.profiletimer.Step("MergePullRequests::getGitHubInfo")
 
 	// MergeCheck
 	if sd.config.Repo.MergeCheck != "" {
-		localCommits := git.GetLocalCommitStack(sd.config, sd.gitcmd)
+		localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
 		if len(localCommits) > 0 {
 			lastCommit := localCommits[len(localCommits)-1]
 			checkedCommit, found := sd.config.State.MergeCheckCommit[githubInfo.Key()]
@@ -516,6 +517,9 @@ func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
 //	prints out the status of each. It does not make any updates locally or
 //	remotely on github.
 func (sd *stackediff) StatusPullRequests(ctx context.Context) {
+	if !sd.checkStackUsable() {
+		return
+	}
 	sd.profiletimer.Step("StatusPullRequests::Start")
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 
@@ -543,6 +547,17 @@ func (sd *stackediff) SyncStack(ctx context.Context) {
 	sd.profiletimer.Step("SyncStack::Start")
 	defer sd.profiletimer.Step("SyncStack::End")
 
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "Running: jj git fetch\n")
+		if err := sd.vcsOps.Fetch(); err != nil {
+			fmt.Fprintf(sd.output, "error: %s\n", err)
+			return
+		}
+		fmt.Fprintf(sd.output, "done. To also rebase onto the latest trunk, use `%s update`.\n",
+			sd.vcsOps.CommandName())
+		return
+	}
+
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 
 	if len(githubInfo.PullRequests) == 0 {
@@ -565,7 +580,11 @@ func (sd *stackediff) RunMergeCheck(ctx context.Context) {
 		return
 	}
 
-	localCommits := git.GetLocalCommitStack(sd.config, sd.gitcmd)
+	if !sd.checkStackUsable() {
+		return
+	}
+
+	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
 	if len(localCommits) == 0 {
 		fmt.Println("no local commits - nothing to check")
 		return
@@ -651,14 +670,7 @@ func sortPullRequestsByLocalCommitOrder(pullRequests []*github.PullRequest, loca
 }
 
 func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubInfo {
-	if sd.config.Repo.ForceFetchTags {
-		sd.gitcmd.MustGit("fetch --tags --force", nil)
-	} else {
-		sd.gitcmd.MustGit("fetch", nil)
-	}
-	rebaseCommand := fmt.Sprintf("rebase %s/%s --autostash",
-		sd.config.Repo.GitHubRemote, sd.config.Repo.GitHubBranch)
-	err := sd.gitcmd.Git(rebaseCommand, nil)
+	err := sd.vcsOps.FetchAndRebase(sd.config)
 	if err != nil {
 		return nil
 	}
@@ -683,15 +695,11 @@ func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubI
 func (sd *stackediff) syncCommitStackToGitHub(ctx context.Context,
 	commits []git.Commit, info *github.GitHubInfo,
 ) bool {
-	var output string
-	sd.gitcmd.MustGit("status --porcelain --untracked-files=no", &output)
-	if output != "" {
-		err := sd.gitcmd.Git("stash", nil)
-		if err != nil {
-			return false
-		}
-		defer sd.gitcmd.MustGit("stash pop", nil)
+	cleanup, err := sd.vcsOps.PrepareForPush()
+	if err != nil {
+		return false
 	}
+	defer cleanup()
 
 	commitUpdated := func(c git.Commit, info *github.GitHubInfo) bool {
 		for _, pr := range info.PullRequests {
@@ -712,24 +720,9 @@ func (sd *stackediff) syncCommitStackToGitHub(ctx context.Context,
 		}
 	}
 
-	var refNames []string
-	for _, commit := range updatedCommits {
-		branchName := git.BranchNameFromCommit(sd.config, commit)
-		refNames = append(refNames,
-			commit.CommitHash+":refs/heads/"+branchName)
-	}
-
 	if len(updatedCommits) > 0 {
-		if sd.config.Repo.BranchPushIndividually {
-			for _, refName := range refNames {
-				pushCommand := fmt.Sprintf("push --force %s %s", sd.config.Repo.GitHubRemote, refName)
-				sd.gitcmd.MustGit(pushCommand, nil)
-			}
-		} else {
-			pushCommand := fmt.Sprintf("push --force --atomic %s ", sd.config.Repo.GitHubRemote)
-			pushCommand += strings.Join(refNames, " ")
-			sd.gitcmd.MustGit(pushCommand, nil)
-		}
+		err := sd.vcsOps.PushBranches(sd.config, updatedCommits, sd.config.Repo.BranchPushIndividually)
+		check(err)
 	}
 	sd.profiletimer.Step("SyncCommitStack::PushBranches")
 	return true
