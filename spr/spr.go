@@ -159,6 +159,21 @@ func (sd *stackediff) EditCommit(ctx context.Context) {
 
 	targetCommit := localCommits[commitIndex]
 
+	// jj mode: no session, no state file. Just announce + run `jj edit` to
+	// move @ to the target commit. Descendants auto-rebase, conflicts are
+	// first-class objects, jj undo handles revert — nothing else to do.
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "\nEditing commit %d (%s): running `jj edit %s`\n",
+			commitIndex+1, targetCommit.Subject, targetCommit.ChangeID)
+		err = sd.vcsOps.EditStart(targetCommit)
+		if err != nil {
+			fmt.Fprintf(sd.output, "error: %s\n", err)
+			return
+		}
+		fmt.Fprintf(sd.output, "To revert any changes: jj undo\n")
+		return
+	}
+
 	err = sd.vcsOps.EditStart(targetCommit)
 	if err != nil {
 		fmt.Fprintf(sd.output, "Failed to start edit session: %s\n", err)
@@ -174,6 +189,13 @@ func (sd *stackediff) EditCommit(ctx context.Context) {
 //
 //	and continuing the rebase to restore the full stack.
 func (sd *stackediff) EditCommitDone(ctx context.Context, update bool) {
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "jj does not track edit sessions. These flags are git-mode only.\n")
+		fmt.Fprintf(sd.output, "To return after editing: jj new <change-id>\n")
+		fmt.Fprintf(sd.output, "To revert changes:       jj undo\n")
+		return
+	}
+
 	if !sd.isEditing() {
 		fmt.Fprintf(sd.output, "No edit session in progress.\n")
 		return
@@ -202,6 +224,12 @@ func (sd *stackediff) EditCommitDone(ctx context.Context, update bool) {
 
 // EditCommitAbort aborts the current edit session and restores the original stack.
 func (sd *stackediff) EditCommitAbort(ctx context.Context) {
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "jj does not track edit sessions. These flags are git-mode only.\n")
+		fmt.Fprintf(sd.output, "To revert changes: jj undo\n")
+		return
+	}
+
 	if !sd.isEditing() {
 		fmt.Fprintf(sd.output, "No edit session in progress.\n")
 		return
@@ -538,6 +566,17 @@ func (sd *stackediff) StatusPullRequests(ctx context.Context) {
 func (sd *stackediff) SyncStack(ctx context.Context) {
 	sd.profiletimer.Step("SyncStack::Start")
 	defer sd.profiletimer.Step("SyncStack::End")
+
+	if sd.vcsOps.CommandName() == "jj spr" {
+		fmt.Fprintf(sd.output, "Running: jj git fetch\n")
+		if err := sd.vcsOps.Fetch(); err != nil {
+			fmt.Fprintf(sd.output, "error: %s\n", err)
+			return
+		}
+		fmt.Fprintf(sd.output, "done. To also rebase onto the latest trunk, use `%s update`.\n",
+			sd.vcsOps.CommandName())
+		return
+	}
 
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 

@@ -92,9 +92,13 @@ type VCSOperations interface {
 	CommandName() string
 }
 
-// NewVCSOperations creates a VCSOperations implementation. Currently this
-// returns the git implementation unconditionally; alternate VCS backends
-// (e.g. jj/Jujutsu) would extend this factory with their own detection.
+// NewVCSOperations creates a VCSOperations implementation appropriate for the
+// current repository. If the repo is jj-colocated (both .jj/ and .git/ exist
+// — see IsJJColocated) and the user has not set noJJ, returns a jj
+// implementation. Otherwise returns a git implementation.
 func NewVCSOperations(cfg *config.Config, gitcmd git.GitInterface) VCSOperations {
+	if !cfg.User.NoJJ && IsJJColocated(gitcmd.RootDir()) {
+		return NewJjOps(cfg, NewJjCmd(gitcmd.RootDir()), gitcmd)
+	}
 	return NewGitOps(cfg, gitcmd)
 }
