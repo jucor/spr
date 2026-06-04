@@ -98,7 +98,7 @@ func TestParseJjLogOutput_MultipleTrailers_FirstWins(t *testing.T) {
 	// Two commit-id lines. FindStringSubmatch returns the first match
 	// in the input, so the first one wins. Pin this so a future regex
 	// change doesn't silently flip to last-wins.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:aaaaaaaa\ncommit-id:bbbbbbbb\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:aaaaaaaa\ncommit-id:bbbbbbbb\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.True(t, valid)
 	require.Len(t, commits, 1)
@@ -107,7 +107,7 @@ func TestParseJjLogOutput_MultipleTrailers_FirstWins(t *testing.T) {
 
 func TestParseJjLogOutput_TrailerWithExtraWhitespace(t *testing.T) {
 	// `\s*` matches one space already; multiple spaces also fine.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:   abcd1234\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:   abcd1234\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.True(t, valid)
 	assert.Equal(t, "abcd1234", commits[0].sprCommitID)
@@ -116,7 +116,7 @@ func TestParseJjLogOutput_TrailerWithExtraWhitespace(t *testing.T) {
 func TestParseJjLogOutput_UppercaseTrailerIgnored(t *testing.T) {
 	// `Commit-Id:` (capital C, capital I) is NOT recognized. The commit
 	// is treated as if it had no trailer → valid=false.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\nCommit-Id:abcd1234\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\nCommit-Id:abcd1234\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.False(t, valid, "uppercase trailer must NOT match (case-sensitive regex)")
 	assert.Empty(t, commits[0].sprCommitID)
@@ -128,7 +128,7 @@ func TestParseJjLogOutput_TrailerLikeStringInBody(t *testing.T) {
 	// in their PR body, spr will treat it as the trailer. This is a known
 	// behavior, not necessarily desirable, but pinning prevents accidental
 	// regression in either direction.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\n" +
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\n" +
 		"This PR follows commit-id:fedcba98 in the related work.\n\n" +
 		"commit-id:abcd1234\n\x1e"
 	commits, valid := parseJjLogOutput(input)
@@ -139,7 +139,7 @@ func TestParseJjLogOutput_TrailerLikeStringInBody(t *testing.T) {
 
 func TestParseJjLogOutput_TrailerTooShort(t *testing.T) {
 	// 7 hex chars doesn't match (need exactly 8 in the regex).
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:abcdef1\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:abcdef1\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.False(t, valid)
 	assert.Empty(t, commits[0].sprCommitID)
@@ -147,7 +147,7 @@ func TestParseJjLogOutput_TrailerTooShort(t *testing.T) {
 
 func TestParseJjLogOutput_TrailerTooLong_FirstEightWin(t *testing.T) {
 	// 12 hex chars: regex captures the first 8 only.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:0123456789ab\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:0123456789ab\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.True(t, valid)
 	assert.Equal(t, "01234567", commits[0].sprCommitID)
@@ -155,7 +155,7 @@ func TestParseJjLogOutput_TrailerTooLong_FirstEightWin(t *testing.T) {
 
 func TestParseJjLogOutput_TrailerNonHexIgnored(t *testing.T) {
 	// `xyz12345` is not all hex → no match → invalid.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:xyz12345\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\ncommit-id:xyz12345\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.False(t, valid)
 	assert.Empty(t, commits[0].sprCommitID)
@@ -164,7 +164,7 @@ func TestParseJjLogOutput_TrailerNonHexIgnored(t *testing.T) {
 func TestParseJjLogOutput_DescriptionWithCRLF(t *testing.T) {
 	// Some editors / pipes may produce CRLF. TrimSpace and the content-
 	// based regex handle this gracefully.
-	input := "hash\x1fchange\x1ffalse\x1fsubject\r\n\r\nbody\r\n\r\ncommit-id:abcd1234\r\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\r\n\r\nbody\r\n\r\ncommit-id:abcd1234\r\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.True(t, valid, "CRLF in description must not break trailer detection")
 	assert.Equal(t, "abcd1234", commits[0].sprCommitID)
@@ -177,7 +177,7 @@ func TestParseJjLogOutput_DescriptionWithCRLF(t *testing.T) {
 // the body don't surface spr's internal trailer. Matches git-mode
 // behavior in git/helpers.go::parseLocalCommitStack.
 func TestParseJjLogOutput_TrailerStrippedFromBody(t *testing.T) {
-	input := "hash\x1fchange\x1ffalse\x1fsubject\n\nReal body text.\n\nMore body text.\n\ncommit-id:abcd1234\n\x1e"
+	input := "abcdef0123\x1fchange\x1ffalse\x1fsubject\n\nReal body text.\n\nMore body text.\n\ncommit-id:abcd1234\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.True(t, valid)
 	require.Len(t, commits, 1)
@@ -191,7 +191,7 @@ func TestParseJjLogOutput_MalformedRecord_Skipped(t *testing.T) {
 	// it via the `len(fields) < 4` defensive guard. Second record is
 	// well-formed and should be retained.
 	input := "garbage-record-with-no-separators\x1e" +
-		"hash\x1fchange\x1ffalse\x1fok\n\ncommit-id:abcd1234\n\x1e"
+		"abcdef0123\x1fchange\x1ffalse\x1fok\n\ncommit-id:abcd1234\n\x1e"
 	commits, valid := parseJjLogOutput(input)
 	require.True(t, valid)
 	require.Len(t, commits, 1, "malformed record must be skipped, well-formed one retained")

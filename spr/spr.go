@@ -764,7 +764,12 @@ func (sd *stackediff) identifyOrphanChangeIDs(ctx context.Context) []string {
 		return nil
 	}
 
-	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+	localCommits, err := sd.vcsOps.GetLocalCommitStack()
+	if err != nil {
+		// Best-effort: stay silent and skip pruning so a transient
+		// VCS error doesn't block the surrounding fetchAndGetGitHubInfo.
+		return nil
+	}
 	var changeIDs []string
 	var matched []*github.PullRequest
 	var matchedSubjects []string
