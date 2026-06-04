@@ -31,7 +31,7 @@ func TestJjOpsFetchAndRebase(t *testing.T) {
 	jjmock.ExpectFetch()
 	jjmock.ExpectRebase()
 
-	err := ops.FetchAndRebase(cfg)
+	err := ops.FetchAndRebase(cfg, nil)
 	require.NoError(t, err)
 	jjmock.ExpectationsMet()
 }
@@ -45,7 +45,7 @@ func TestJjOpsFetchAndRebase_NoRebase(t *testing.T) {
 	// Only fetch, no rebase
 	jjmock.ExpectFetch()
 
-	err := ops.FetchAndRebase(cfg)
+	err := ops.FetchAndRebase(cfg, nil)
 	require.NoError(t, err)
 	jjmock.ExpectationsMet()
 }
@@ -196,7 +196,7 @@ func TestJjOpsFetchAndRebase_FetchFails(t *testing.T) {
 	jjmock.ExpectFetchAndFail(fmt.Errorf("network is down"))
 	// Note: no ExpectRebase — rebase must not run if fetch failed.
 
-	err := ops.FetchAndRebase(cfg)
+	err := ops.FetchAndRebase(cfg, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "network is down")
 	jjmock.ExpectationsMet()
@@ -210,9 +210,102 @@ func TestJjOpsFetchAndRebase_RebaseFails(t *testing.T) {
 	jjmock.ExpectFetch()
 	jjmock.ExpectRebaseAndFail(fmt.Errorf("rebase conflict"))
 
-	err := ops.FetchAndRebase(cfg)
+	err := ops.FetchAndRebase(cfg, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rebase conflict")
+	jjmock.ExpectationsMet()
+}
+
+// --- AbandonChangeIDs + FetchAndRebase orphan-prune path ---
+
+func TestJjOpsAbandonChangeIDs_Empty(t *testing.T) {
+	cfg := makeJjTestConfig()
+	jjmock := mockjj.NewMockJj(t)
+	ops := NewJjOps(cfg, jjmock, nil)
+
+	// Empty / nil input must issue zero jj commands.
+	require.NoError(t, ops.AbandonChangeIDs(nil))
+	require.NoError(t, ops.AbandonChangeIDs([]string{}))
+	require.NoError(t, ops.AbandonChangeIDs([]string{""}))
+	jjmock.ExpectationsMet()
+}
+
+func TestJjOpsAbandonChangeIDs_MultipleInOrder(t *testing.T) {
+	cfg := makeJjTestConfig()
+	jjmock := mockjj.NewMockJj(t)
+	ops := NewJjOps(cfg, jjmock, nil)
+
+	jjmock.ExpectAbandon("abc")
+	jjmock.ExpectAbandon("def")
+	jjmock.ExpectAbandon("ghi")
+
+	require.NoError(t, ops.AbandonChangeIDs([]string{"abc", "def", "ghi"}))
+	jjmock.ExpectationsMet()
+}
+
+func TestJjOpsAbandonChangeIDs_ShortCircuitOnError(t *testing.T) {
+	cfg := makeJjTestConfig()
+	jjmock := mockjj.NewMockJj(t)
+	ops := NewJjOps(cfg, jjmock, nil)
+
+	jjmock.ExpectAbandon("abc")
+	jjmock.ExpectAbandonAndFail("def", fmt.Errorf("immutable"))
+	// "ghi" must not be attempted after the failure.
+
+	err := ops.AbandonChangeIDs([]string{"abc", "def", "ghi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "jj abandon def")
+	assert.Contains(t, err.Error(), "immutable")
+	jjmock.ExpectationsMet()
+}
+
+func TestJjOpsFetchAndRebase_WithOrphans_AbandonsBeforeRebase(t *testing.T) {
+	cfg := makeJjTestConfig()
+	jjmock := mockjj.NewMockJj(t)
+	ops := NewJjOps(cfg, jjmock, nil)
+
+	// Expected sequence: fetch first, then abandon each orphan in order,
+	// then rebase. Verifies that abandon happens BEFORE rebase so the
+	// rebase never sees the orphan patches.
+	jjmock.ExpectFetch()
+	jjmock.ExpectAbandon("orphan1")
+	jjmock.ExpectAbandon("orphan2")
+	jjmock.ExpectRebase()
+
+	err := ops.FetchAndRebase(cfg, []string{"orphan1", "orphan2"})
+	require.NoError(t, err)
+	jjmock.ExpectationsMet()
+}
+
+func TestJjOpsFetchAndRebase_WithOrphans_AbandonFailsSkipsRebase(t *testing.T) {
+	cfg := makeJjTestConfig()
+	jjmock := mockjj.NewMockJj(t)
+	ops := NewJjOps(cfg, jjmock, nil)
+
+	// Fetch succeeds, abandon fails — rebase must NOT run, since rebasing
+	// with the orphan still present would reproduce the bug we're trying
+	// to prevent.
+	jjmock.ExpectFetch()
+	jjmock.ExpectAbandonAndFail("orphan1", fmt.Errorf("immutable"))
+
+	err := ops.FetchAndRebase(cfg, []string{"orphan1", "orphan2"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "immutable")
+	jjmock.ExpectationsMet()
+}
+
+func TestJjOpsFetchAndRebase_NoRebase_SkipsAbandon(t *testing.T) {
+	cfg := makeJjTestConfig()
+	cfg.User.NoRebase = true
+	jjmock := mockjj.NewMockJj(t)
+	ops := NewJjOps(cfg, jjmock, nil)
+
+	// NoRebase => fetch only. No abandon either: without rebase there's
+	// no failure to prevent, and abandoning blindly could surprise users.
+	jjmock.ExpectFetch()
+
+	err := ops.FetchAndRebase(cfg, []string{"would-be-orphan"})
+	require.NoError(t, err)
 	jjmock.ExpectationsMet()
 }
 

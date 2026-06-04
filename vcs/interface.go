@@ -9,10 +9,26 @@ import (
 // git and jj (Jujutsu). Operations like push, fetch, and branch management
 // stay on git.GitInterface; only history-rewriting operations are abstracted here.
 type VCSOperations interface {
-	// FetchAndRebase fetches from remote and rebases local stack onto updated trunk.
+	// FetchAndRebase fetches from remote, abandons orphaned local commits
+	// (those listed in orphanChangeIDs), then rebases the local stack onto
+	// the updated trunk. Orphan handling is no-op in git mode (git rebase's
+	// patch-id detection already drops absorbed patches; drift cases remain
+	// uncovered upstream — see docs/jj-mode-design.md). In jj mode it runs
+	// `jj abandon` for each ID before rebasing, which prevents both the
+	// orphan-empty stubs and the duplicate-content / structural-overlap
+	// conflicts that arise when stacked PRs are squash-merged on GitHub.
 	// Git: git fetch + git rebase origin/main --autostash
-	// jj:  jj git fetch + jj rebase -b @ -d main@origin
-	FetchAndRebase(cfg *config.Config) error
+	// jj:  jj git fetch + jj abandon <orphans...> + jj rebase -b @ -d main@origin --skip-emptied
+	FetchAndRebase(cfg *config.Config, orphanChangeIDs []string) error
+
+	// AbandonChangeIDs drops the listed local commits without affecting their
+	// descendants' content (jj's auto-rebase preserves trees through abandon).
+	// Used by FetchAndRebase to clear orphan PRs whose content has been
+	// absorbed by an upstream squash, so the subsequent rebase doesn't trip
+	// on duplicate-content 3-way merges.
+	// Git: no-op — git's rebase handles the equivalent case via patch-id.
+	// jj:  jj abandon <id> for each entry.
+	AbandonChangeIDs(changeIDs []string) error
 
 	// Fetch pulls remote refs without rebasing. Used by `spr sync` in jj mode
 	// where jj's change-id alignment makes a cherry-pick unnecessary; the user
