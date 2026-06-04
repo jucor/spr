@@ -694,9 +694,18 @@ func sortPullRequestsByLocalCommitOrder(pullRequests []*github.PullRequest, loca
 }
 
 func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubInfo {
-	// Phase 2c will populate orphanChangeIDs from PR state; passing nil now
-	// matches the pre-2a behavior (no orphans to abandon).
-	err := sd.vcsOps.FetchAndRebase(sd.config, nil)
+	// Identify orphan local commits before fetching, so jj can `jj abandon`
+	// them in FetchAndRebase before the rebase step. An orphan is a local
+	// commit whose corresponding PR is in state CLOSED-not-merged on
+	// GitHub (the spr-merge code path closes them when a higher PR is
+	// squash-merged on the stack — see MergePullRequests). Without this
+	// pre-rebase abandon, jj's 3-way merge produces conflicts when the
+	// orphan's local diff overlaps with the squash's cumulative content
+	// (the polis production form). See docs/jj-mode-design.md for the
+	// full mechanism + design.
+	orphanChangeIDs := sd.identifyOrphanChangeIDs(ctx)
+
+	err := sd.vcsOps.FetchAndRebase(sd.config, orphanChangeIDs)
 	if err != nil {
 		return nil
 	}
@@ -712,6 +721,80 @@ func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubI
 	}
 
 	return info
+}
+
+// identifyOrphanChangeIDs returns the local change IDs of commits whose
+// PRs are closed-but-not-merged on GitHub. This is the orphan signal the
+// jj-mode FetchAndRebase uses to `jj abandon` the local copies before
+// rebase, preventing the cascade-orphan conflict cascade.
+//
+// Unconditional: this is parity behavior with git mode (git rebase
+// silently drops absorbed commits via patch-id detection on every
+// `spr update`). The jj equivalent — `jj abandon` of the same commits
+// — must happen with the same default-on transparency. When orphans
+// are detected, sd.output gets a notice naming each one and a recovery
+// hint (`jj op restore`) so the user can undo if anything looks wrong.
+//
+// Returns nil (not empty) on any failure to query GitHub or read local
+// commits — nil is the safe default since FetchAndRebase treats it as
+// "no orphans to prune". A loud failure here would block all spr updates
+// because the GitHub query is best-effort.
+func (sd *stackediff) identifyOrphanChangeIDs(ctx context.Context) []string {
+	// NoRebase short-circuits FetchAndRebase to fetch-only and never invokes
+	// AbandonChangeIDs. Skip detection so we don't print "Abandoning local
+	// copies..." for an abandon that never happens.
+	if sd.config.User.NoRebase {
+		return nil
+	}
+	orphanPRs := sd.github.GetClosedOrphanPRs(ctx)
+	if len(orphanPRs) == 0 {
+		return nil
+	}
+	// Index orphan PRs by spr commit-id (the trailer value, not the git
+	// hash) so we can look up the matching PR while iterating the local
+	// stack. We keep the *PR pointer so the user notice can name the PR
+	// number and title.
+	orphanByCommitID := make(map[string]*github.PullRequest, len(orphanPRs))
+	for _, pr := range orphanPRs {
+		if pr.Commit.CommitID != "" {
+			orphanByCommitID[pr.Commit.CommitID] = pr
+		}
+	}
+	if len(orphanByCommitID) == 0 {
+		return nil
+	}
+
+	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+	var changeIDs []string
+	var matched []*github.PullRequest
+	var matchedSubjects []string
+	for _, c := range localCommits {
+		pr, ok := orphanByCommitID[c.CommitID]
+		if !ok {
+			continue
+		}
+		if c.ChangeID == "" {
+			// jj change ID is required for `jj abandon`. Git-mode commits
+			// won't have one, so this path naturally skips in git mode.
+			continue
+		}
+		changeIDs = append(changeIDs, c.ChangeID)
+		matched = append(matched, pr)
+		matchedSubjects = append(matchedSubjects, c.Subject)
+	}
+	if len(changeIDs) > 0 {
+		fmt.Fprintf(sd.output,
+			"Detected %d PR(s) closed-not-merged on GitHub whose commits are in your local stack.\n",
+			len(changeIDs))
+		fmt.Fprintf(sd.output,
+			"These were absorbed by an upstream squash-merge. Abandoning local copies to avoid rebase conflicts:\n")
+		for i, pr := range matched {
+			fmt.Fprintf(sd.output, "  - PR #%d: %s\n", pr.Number, matchedSubjects[i])
+		}
+		fmt.Fprintf(sd.output,
+			"If this looks wrong, run `jj op log` and `jj op restore <id>` to undo.\n")
+	}
+	return changeIDs
 }
 
 // syncCommitStackToGitHub gets all the local commits in the given branch
