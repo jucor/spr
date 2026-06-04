@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/ejoffe/rake"
@@ -13,6 +15,7 @@ import (
 	"github.com/ejoffe/spr/git/realgit"
 	"github.com/ejoffe/spr/github/githubclient"
 	"github.com/ejoffe/spr/spr"
+	"github.com/ejoffe/spr/vcs"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -95,9 +98,33 @@ func main() {
 	}
 	gitcmd = realgit.NewGitCmd(cfg)
 
+	// Check for --no-jj flag or SPR_NOJJ env var before creating VCS operations.
+	// This must happen before app.Run() since vcsOps is created here, so
+	// urfave/cli's later flag/env parsing won't be in time to affect jj
+	// detection. Accept all standard boolean forms: bare `--no-jj`,
+	// `--no-jj=true`, and any SPR_NOJJ value strconv.ParseBool understands
+	// (`1`, `t`, `T`, `TRUE`, `true`, ...).
+	for _, arg := range os.Args[1:] {
+		if arg == "--no-jj" {
+			cfg.User.NoJJ = true
+			continue
+		}
+		if v, ok := strings.CutPrefix(arg, "--no-jj="); ok {
+			if b, err := strconv.ParseBool(v); err == nil {
+				cfg.User.NoJJ = b
+			}
+		}
+	}
+	if v := os.Getenv("SPR_NOJJ"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil && b {
+			cfg.User.NoJJ = true
+		}
+	}
+
 	ctx := context.Background()
 	client := githubclient.NewGitHubClient(ctx, cfg)
-	stackedpr := spr.NewStackedPR(cfg, client, gitcmd)
+	vcsOps := vcs.NewVCSOperations(cfg, gitcmd)
+	stackedpr := spr.NewStackedPR(cfg, client, gitcmd, vcsOps)
 
 	detailFlag := &cli.BoolFlag{
 		Name:  "detail",
@@ -159,6 +186,12 @@ VERSION: fork of {{.Version}}
 				Name:  "debug",
 				Value: false,
 				Usage: "Show runtime debug info",
+			},
+			&cli.BoolFlag{
+				Name:    "no-jj",
+				Value:   false,
+				Usage:   "Disable jj (Jujutsu) mode even in jj-colocated repos",
+				EnvVars: []string{"SPR_NOJJ"},
 			},
 		},
 		Before: func(c *cli.Context) error {
@@ -346,6 +379,25 @@ VERSION: fork of {{.Version}}
 				return nil
 			},
 		},
+			{
+				Name:  "jj-setup",
+				Usage: "Register 'jj spr' alias for use in Jujutsu repos",
+				Action: func(c *cli.Context) error {
+					cmd := exec.Command("jj", "config", "set", "--user",
+						"aliases.spr", `["util", "exec", "--", "git-spr"]`)
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					err := cmd.Run()
+					if err != nil {
+						return cli.Exit(fmt.Sprintf("Failed to set jj alias: %s", err), 1)
+					}
+					fmt.Println("jj alias registered. You can now use:")
+					fmt.Println("  jj spr update")
+					fmt.Println("  jj spr status")
+					fmt.Println("  jj spr merge")
+					return nil
+				},
+			},
 			{
 				Name:  "version",
 				Usage: "Show version info",

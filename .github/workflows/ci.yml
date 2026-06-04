@@ -2,6 +2,11 @@ name: golang build
 
 on: [push, pull_request, workflow_dispatch]
 
+env:
+  # Pin the jj version used by integration tests. Bump intentionally;
+  # jj's revset/template syntax can change between minor versions.
+  JJ_VERSION: 0.40.0
+
 jobs:
 
   build:
@@ -15,13 +20,46 @@ jobs:
       with:
         go-version: 1.21
 
+    - name: Install jj
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.local/bin"
+        curl -fsSL \
+          "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+          | tar -xz -C "$HOME/.local/bin" jj
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/jj" --version
+
     - name: Build
       working-directory: ./
       run: go build -v ./...
 
-    - name: Test
+    - name: Test (unit)
       working-directory: ./
-      run: go test -race -coverprofile=./coverage.txt -covermode=atomic ./...
+      run: go test -race -coverpkg=./... -coverprofile=cov-unit.out -covermode=atomic ./...
+
+    - name: Test (integration)
+      working-directory: ./
+      run: |
+        # Configure a default git identity so jj's colocated git backend
+        # has something to use (the per-repo overrides in jjtest also set
+        # this, but a global default avoids any first-call edge cases).
+        git config --global user.name "spr-ci"
+        git config --global user.email "spr-ci@example.com"
+        go test -race -tags=integration -coverpkg=./... -coverprofile=cov-integration.out -covermode=atomic ./...
+
+    - name: Merge coverage and report per-file attribution
+      working-directory: ./
+      run: go run ./scripts/coverage-merge cov-unit.out cov-integration.out cov-merged.out
+
+    - name: Upload coverage artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage
+        path: |
+          cov-unit.out
+          cov-integration.out
+          cov-merged.out
 
     - name: Check goreleaser file
       uses: goreleaser/goreleaser-action@v6.2.1
@@ -29,8 +67,7 @@ jobs:
         version: latest
         args: check
 
-    #- name: Upload coverage
+    #- name: Upload coverage to codecov
     #  uses: codecov/codecov-action@v2
     #  with:
-    #    files: ./coverage.txt
-
+    #    files: ./cov-merged.out
