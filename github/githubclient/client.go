@@ -252,6 +252,67 @@ func (c *client) GetInfo(ctx context.Context, gitcmd git.GitInterface) *github.G
 	return info
 }
 
+// GetClosedOrphanPRs returns PRs in GitHub state CLOSED-not-merged whose
+// HeadRefName matches the configured spr branch prefix. The returned PRs
+// have .Commit.CommitID populated from the HeadRefName so callers don't
+// have to re-parse trailers. See GitHubInterface for the full contract.
+//
+// Implementation note: the closed-PR query is identical in shape to the
+// open-PR query so we can reuse the same matching helper. Filtering
+// happens twice — server-side by `states:[CLOSED]` (excludes OPEN and
+// MERGED) and client-side by HeadRefName prefix (excludes any closed
+// PRs that weren't created by spr).
+func (c *client) GetClosedOrphanPRs(ctx context.Context) []*github.PullRequest {
+	if c.config.User.LogGitHubCalls {
+		fmt.Printf("> github fetch closed-orphan pull requests\n")
+	}
+
+	resp, err := c.api.ClosedOrphanPullRequests(ctx,
+		c.config.Repo.GitHubRepoOwner,
+		c.config.Repo.GitHubRepoName)
+	if err != nil {
+		log.Debug().Err(err).Msg("GetClosedOrphanPRs: query failed")
+		return nil
+	}
+
+	orphans := filterClosedOrphans(resp.Viewer.PullRequests.Nodes, c.config.User.BranchPrefix)
+	log.Debug().Int("count", len(orphans)).Msg("GetClosedOrphanPRs")
+	return orphans
+}
+
+// filterClosedOrphans is the pure filter step extracted from
+// GetClosedOrphanPRs so it can be unit-tested without mocking the
+// GraphQL transport. It keeps nodes whose HeadRefName matches the spr
+// branch pattern and populates Commit.CommitID from the captured group.
+func filterClosedOrphans(
+	nodes *fezzik_types.PullRequestsViewerPullRequestsNodes,
+	branchPrefix string,
+) []*github.PullRequest {
+	if nodes == nil {
+		return []*github.PullRequest{}
+	}
+	branchRegex := git.BranchNameRegex(branchPrefix)
+	orphans := make([]*github.PullRequest, 0, len(*nodes))
+	for _, node := range *nodes {
+		matches := branchRegex.FindStringSubmatch(node.HeadRefName)
+		if matches == nil {
+			continue
+		}
+		orphans = append(orphans, &github.PullRequest{
+			ID:         node.Id,
+			Number:     node.Number,
+			Title:      node.Title,
+			Body:       node.Body,
+			FromBranch: node.HeadRefName,
+			ToBranch:   node.BaseRefName,
+			Commit: git.Commit{
+				CommitID: matches[2],
+			},
+		})
+	}
+	return orphans
+}
+
 func matchPullRequestStack(
 	repoConfig *config.RepoConfig,
 	branchPrefix string,

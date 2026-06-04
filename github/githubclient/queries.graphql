@@ -79,6 +79,51 @@ query PullRequestsWithMergeQueue(
 	}
 }
 
+query ClosedOrphanPullRequests(
+	$repo_owner: String!,
+	$repo_name: String!,
+){
+	viewer {
+		login
+		# first:100, orderBy UPDATED_AT DESC so the most recent orphans
+		# (those most likely to still match an active local stack) come
+		# first if a repo has >100 historical closed spr PRs. spr's
+		# cascade-orphan recovery only needs recent CLOSED PRs whose
+		# HeadRefName still matches the local commit-id trailer; older
+		# than 100 is effectively dead state.
+		pullRequests(first:100, states:[CLOSED], orderBy:{field:UPDATED_AT, direction:DESC}) {
+			nodes {
+				id
+				number
+				title
+				body
+				baseRefName
+				headRefName
+				mergeable
+				reviewDecision
+				repository {
+					id
+				}
+				commits(first:100) {
+					nodes {
+						commit {
+							oid
+							messageHeadline
+							messageBody
+							statusCheckRollup {
+								state
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	repository(owner:$repo_owner, name:$repo_name) {
+		id
+	}
+}
+
 query AssignableUsers(
 	$repo_owner: String!,	
 	$repo_name: String!,	

@@ -753,3 +753,67 @@ func TestComputeRequiredCheckStatus(t *testing.T) {
 		})
 	}
 }
+
+// filterClosedOrphans is the pure filter step inside GetClosedOrphanPRs.
+// These tests exercise the matching independently of the GraphQL
+// transport — nodes are constructed directly via fezzik_types.
+func TestFilterClosedOrphans(t *testing.T) {
+	tests := []struct {
+		name         string
+		branchPrefix string
+		nodes        *fezzik_types.PullRequestsViewerPullRequestsNodes
+		expectIDs    []string // expected Commit.CommitID values in order
+	}{
+		{
+			name:         "nil_nodes",
+			branchPrefix: "spr",
+			nodes:        nil,
+			expectIDs:    nil, // empty slice
+		},
+		{
+			name:         "no_closed_prs",
+			branchPrefix: "spr",
+			nodes:        &fezzik_types.PullRequestsViewerPullRequestsNodes{},
+			expectIDs:    nil,
+		},
+		{
+			name:         "matches_spr_branches_extracts_commit_id",
+			branchPrefix: "spr",
+			nodes: &fezzik_types.PullRequestsViewerPullRequestsNodes{
+				{Id: "p1", Number: 1, HeadRefName: "spr/master/aaaaaaaa", BaseRefName: "master"},
+				{Id: "p2", Number: 2, HeadRefName: "spr/master/bbbbbbbb", BaseRefName: "master"},
+			},
+			expectIDs: []string{"aaaaaaaa", "bbbbbbbb"},
+		},
+		{
+			name:         "skips_non_spr_branches",
+			branchPrefix: "spr",
+			nodes: &fezzik_types.PullRequestsViewerPullRequestsNodes{
+				{Id: "p1", Number: 1, HeadRefName: "feature/unrelated", BaseRefName: "master"},
+				{Id: "p2", Number: 2, HeadRefName: "spr/master/cccccccc", BaseRefName: "master"},
+				{Id: "p3", Number: 3, HeadRefName: "user/bugfix", BaseRefName: "master"},
+			},
+			expectIDs: []string{"cccccccc"},
+		},
+		{
+			name:         "respects_custom_branch_prefix",
+			branchPrefix: "stack",
+			nodes: &fezzik_types.PullRequestsViewerPullRequestsNodes{
+				{Id: "p1", Number: 1, HeadRefName: "spr/master/aaaaaaaa", BaseRefName: "master"},
+				{Id: "p2", Number: 2, HeadRefName: "stack/master/dddddddd", BaseRefName: "master"},
+			},
+			expectIDs: []string{"dddddddd"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterClosedOrphans(tc.nodes, tc.branchPrefix)
+			var gotIDs []string
+			for _, pr := range got {
+				gotIDs = append(gotIDs, pr.Commit.CommitID)
+			}
+			require.Equal(t, tc.expectIDs, gotIDs)
+		})
+	}
+}
