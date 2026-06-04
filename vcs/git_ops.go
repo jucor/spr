@@ -29,7 +29,17 @@ func (g *GitOps) Fetch() error {
 
 // FetchAndRebase fetches from remote and rebases the local stack.
 // Extracted from spr.go fetchAndGetGitHubInfo().
-func (g *GitOps) FetchAndRebase(cfg *config.Config) error {
+//
+// orphanChangeIDs is ignored in git mode. Git has no native "abandon by
+// stable change-id" operation; the closest analogue (orphan commits
+// whose patches are absorbed by an upstream squash) is already handled
+// by `git rebase`'s default patch-id detection — see
+// vcs/gittest/cascade_integration_test.go for the asserted self-healing
+// behavior. The drift / structural-overlap cases that need real orphan
+// handling in jj mode have no equivalent upstream-shaped fix in git mode
+// today.
+func (g *GitOps) FetchAndRebase(cfg *config.Config, orphanChangeIDs []string) error {
+	_ = orphanChangeIDs
 	if cfg.Repo.ForceFetchTags {
 		g.gitcmd.MustGit("fetch --tags --force", nil)
 	} else {
@@ -38,6 +48,15 @@ func (g *GitOps) FetchAndRebase(cfg *config.Config) error {
 	rebaseCommand := fmt.Sprintf("rebase %s/%s --autostash",
 		cfg.Repo.GitHubRemote, cfg.Repo.GitHubBranch)
 	return g.gitcmd.Git(rebaseCommand, nil)
+}
+
+// AbandonChangeIDs is a no-op in git mode. Provided for interface
+// compatibility — git has no native "abandon by stable id" operation and
+// the jj-mode use case (drop orphans before rebase) is covered for git
+// by `git rebase`'s patch-id self-healing.
+func (g *GitOps) AbandonChangeIDs(changeIDs []string) error {
+	_ = changeIDs
+	return nil
 }
 
 // GetLocalCommitStack returns the local commit stack using git log.

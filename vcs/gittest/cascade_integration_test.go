@@ -69,8 +69,9 @@ func TestGitMode_CascadeOrphans_FetchAndRebase(t *testing.T) {
 	})
 	t.Logf("origin/master advanced to S=%s (contains A+B+C content)", s)
 
-	// Run what `spr update` does in git mode.
-	err := repo.GitOps.FetchAndRebase(repo.Cfg)
+	// Run what `spr update` does in git mode. Orphan list is irrelevant
+	// here (GitOps ignores it; git's rebase handles patch-id self-heal).
+	err := repo.GitOps.FetchAndRebase(repo.Cfg, nil)
 
 	t.Logf("FetchAndRebase returned err=%v", err)
 

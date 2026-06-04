@@ -1320,8 +1320,11 @@ type stubVcsOps struct {
 	fetchError      error
 }
 
-func (s *stubVcsOps) FetchAndRebase(cfg *config.Config) error { return nil }
-func (s *stubVcsOps) Fetch() error                            { s.fetchCalled = true; return s.fetchError }
+func (s *stubVcsOps) FetchAndRebase(cfg *config.Config, orphanChangeIDs []string) error {
+	return nil
+}
+func (s *stubVcsOps) AbandonChangeIDs(changeIDs []string) error { return nil }
+func (s *stubVcsOps) Fetch() error                              { s.fetchCalled = true; return s.fetchError }
 func (s *stubVcsOps) GetLocalCommitStack(cfg *config.Config, gitcmd git.GitInterface) []git.Commit {
 	return s.commits
 }

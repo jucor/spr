@@ -305,13 +305,13 @@ func TestJjIntegration_Fetch_Succeeds(t *testing.T) {
 func TestJjIntegration_FetchAndRebase_NoRebase(t *testing.T) {
 	repo := jjtest.NewRepo(t)
 	repo.Cfg.User.NoRebase = true
-	require.NoError(t, repo.JjOps.FetchAndRebase(repo.Cfg))
+	require.NoError(t, repo.JjOps.FetchAndRebase(repo.Cfg, nil))
 }
 
 func TestJjIntegration_FetchAndRebase_Rebases(t *testing.T) {
 	repo := jjtest.NewRepo(t)
 	repo.AddCommit(t, "C1", true)
-	require.NoError(t, repo.JjOps.FetchAndRebase(repo.Cfg))
+	require.NoError(t, repo.JjOps.FetchAndRebase(repo.Cfg, nil))
 }
 
 // --- AmendInto ---

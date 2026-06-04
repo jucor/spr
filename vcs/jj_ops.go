@@ -33,36 +33,66 @@ func (j *JjOps) Fetch() error {
 	return j.jjcmd.Jj("git fetch", nil)
 }
 
-// FetchAndRebase fetches from remote and rebases using jj commands.
-// Preserves jj change IDs (unlike git rebase which destroys them).
-func (j *JjOps) FetchAndRebase(cfg *config.Config) error {
+// FetchAndRebase fetches from remote, abandons orphan local commits, then
+// rebases the local stack onto the updated trunk. Preserves jj change IDs
+// (unlike git rebase which destroys them).
+//
+// Orphan handling: `jj abandon <id>` is run for each entry in
+// orphanChangeIDs *before* rebase, so the rebase never sees the orphan
+// patches. This prevents two failure modes that arise when stacked PRs
+// are squash-merged on GitHub:
+//   - Empty stubs: orphan whose patch is fully absorbed into the squash
+//     ends up as `[EMPTY]` in the stack after rebase.
+//   - Conflicts: orphan whose local diff overlaps with — but doesn't
+//     bit-match — the cumulative squash diff produces a 3-way merge
+//     conflict. (This is the polis production form.)
+//
+// --skip-emptied additionally handles the clean case where the caller
+// didn't (or couldn't) identify the orphan but its content was wholly
+// absorbed by trunk — matching git rebase's patch-id self-healing.
+//
+// See vcs/jj_cascade_integration_test.go for the behavior matrix.
+func (j *JjOps) FetchAndRebase(cfg *config.Config, orphanChangeIDs []string) error {
 	if cfg.User.NoRebase {
-		// Only fetch, skip rebase (same semantics as git NoRebase)
+		// Only fetch, skip rebase (same semantics as git NoRebase). Orphan
+		// abandon is also skipped — without rebase there's no failure mode
+		// to prevent, and abandoning blindly could surprise the user.
 		return j.jjcmd.Jj("git fetch", nil)
 	}
 
-	err := j.jjcmd.Jj("git fetch", nil)
-	if err != nil {
+	if err := j.jjcmd.Jj("git fetch", nil); err != nil {
 		return err
 	}
 
-	// Rebase current stack onto updated trunk.
-	//
-	// --skip-emptied drops local commits whose patches were absorbed into
-	// the new trunk (e.g. siblings of a mid-stack squash-merge whose
-	// content is now in trunk via the squash). Without this, jj rebase
-	// would leave them around as `[EMPTY]` stubs — the clean form of the
-	// cascade-orphan bug. This matches the patch-id-based behavior of
-	// `git rebase` in git-mode FetchAndRebase. It does NOT help when an
-	// orphan's local diff has structurally drifted from the squashed
-	// version (overlapping but-different edits) — that case still
-	// produces conflicts and needs orphan-PR detection + `jj abandon`
-	// before fetch+rebase. See vcs/jj_cascade_integration_test.go for
-	// the full behavior matrix.
+	if err := j.AbandonChangeIDs(orphanChangeIDs); err != nil {
+		return err
+	}
+
 	remote := cfg.Repo.GitHubRemote
 	branch := cfg.Repo.GitHubBranch
 	rebaseCmd := fmt.Sprintf("rebase -b @ -d %s@%s --skip-emptied", branch, remote)
 	return j.jjcmd.Jj(rebaseCmd, nil)
+}
+
+// AbandonChangeIDs runs `jj abandon <id>` for each provided change ID.
+// Empty input is a no-op. jj abandon drops the commit and auto-rebases
+// descendants without re-applying the abandoned commit's patch, which is
+// exactly what we want for orphans whose content is already in trunk via
+// an upstream squash.
+//
+// Errors short-circuit and return — partial abandon is preferable to
+// silently swallowing failures, since the next rebase step will detect
+// any remaining orphan as a conflict.
+func (j *JjOps) AbandonChangeIDs(changeIDs []string) error {
+	for _, id := range changeIDs {
+		if id == "" {
+			continue
+		}
+		if err := j.jjcmd.Jj("abandon "+id, nil); err != nil {
+			return fmt.Errorf("jj abandon %s: %w", id, err)
+		}
+	}
+	return nil
 }
 
 // GetLocalCommitStack returns unmerged commits using jj log.
