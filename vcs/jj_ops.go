@@ -49,13 +49,24 @@ func (j *JjOps) FetchAndRebase(cfg *config.Config) error {
 	// Rebase current stack onto updated trunk.
 	//
 	// Destination is `trunk()` rather than `<branch>@<remote>`: it tracks
-	// any user customization of jj's trunk() revset (e.g. via the
-	// `revsets.short-prefixes` / `revset-aliases."trunk()"` config) and
-	// stays symmetric with the discovery revset used by
-	// GetLocalCommitStack (`trunk()..(@:: | ::@)`). For users whose
-	// trunk() resolves to `<cfg.Repo.GitHubBranch>@<cfg.Repo.GitHubRemote>`
-	// (jj's default), the destination is identical to the hardcoded form.
-	return j.jjcmd.Jj("rebase -b @ -d trunk()", nil)
+	// any user customization of jj's trunk() revset and stays symmetric
+	// with the discovery revset used by GetLocalCommitStack
+	// (`trunk()..(@:: | ::@)`). For users whose trunk() resolves to
+	// `<cfg.Repo.GitHubBranch>@<cfg.Repo.GitHubRemote>` (jj's default),
+	// the destination is identical to the hardcoded form.
+	//
+	// --skip-emptied drops local commits whose patches were absorbed into
+	// the new trunk (e.g. siblings of a mid-stack squash-merge whose
+	// content is now in trunk via the squash). Without this, jj rebase
+	// would leave them around as `[EMPTY]` stubs — the clean form of the
+	// cascade-orphan bug. This matches the patch-id-based behavior of
+	// `git rebase` in git-mode FetchAndRebase. It does NOT help when an
+	// orphan's local diff has structurally drifted from the squashed
+	// version (overlapping but-different edits) — that case still
+	// produces conflicts and needs orphan-PR detection + `jj abandon`
+	// before fetch+rebase. See vcs/jj_cascade_integration_test.go for
+	// the full behavior matrix.
+	return j.jjcmd.Jj("rebase -b @ -d trunk() --skip-emptied", nil)
 }
 
 // GetLocalCommitStack returns unmerged commits using jj log.

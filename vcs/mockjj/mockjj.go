@@ -76,12 +76,14 @@ func (m *Mock) ExpectFetch() {
 }
 
 // ExpectRebase expects the jj rebase command issued by
-// JjOps.FetchAndRebase — `jj rebase -b @ -d trunk()`. The trunk()-based
-// destination decouples the rebase target from the cfg.Repo.{GitHubRemote,
-// GitHubBranch} pair and respects any user customization of jj's trunk()
-// revset.
+// JjOps.FetchAndRebase — `jj rebase -b @ -d trunk() --skip-emptied`.
+// The trunk()-based destination decouples the rebase target from the
+// cfg.Repo.{GitHubRemote,GitHubBranch} pair and respects any user
+// customization of jj's trunk() revset. --skip-emptied drops local
+// commits whose patches were absorbed into the new trunk by an
+// upstream squash (cascade-orphan empties).
 func (m *Mock) ExpectRebase() {
-	m.expect("jj rebase -b @ -d trunk()")
+	m.expect("jj rebase -b @ -d trunk() --skip-emptied")
 }
 
 // ExpectLogAndRespond expects the jj log command and returns formatted output.
@@ -162,10 +164,11 @@ func (m *Mock) ExpectFetchAndFail(err error) {
 	m.expect("jj git fetch").respondWithError(err)
 }
 
-// ExpectRebaseAndFail expects `jj rebase -b @ -d trunk()` and returns an
-// error. See ExpectRebase for the trunk()-vs-branch@remote rationale.
+// ExpectRebaseAndFail expects the rebase form issued by FetchAndRebase
+// (`jj rebase -b @ -d trunk() --skip-emptied`) and returns an error.
+// See ExpectRebase for the full rationale.
 func (m *Mock) ExpectRebaseAndFail(err error) {
-	m.expect("jj rebase -b @ -d trunk()").respondWithError(err)
+	m.expect("jj rebase -b @ -d trunk() --skip-emptied").respondWithError(err)
 }
 
 // ExpectSquashAndFail expects `jj squash --into <changeID>` and returns an error.
