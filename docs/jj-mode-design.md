@@ -17,11 +17,12 @@ changes are backward-compatible with git-only repos.
 5. [`spr sync` in jj mode](#spr-sync-in-jj-mode)
 6. [WIP truncation](#wip-truncation-kept)
 7. [Conflicts: delegated to jj](#conflicts-delegated-to-jj)
-8. [VCS interface changes](#vcs-interface-changes)
-9. [Bug fix: stdout/stderr separation](#bug-fix-stdoutstderr-separation)
-10. [Testing strategy](#testing-strategy)
-11. [Out of scope / deferred](#out-of-scope--deferred)
-12. [Glossary](#glossary)
+8. [Cascade-orphan recovery](#cascade-orphan-recovery)
+9. [VCS interface changes](#vcs-interface-changes)
+10. [Bug fix: stdout/stderr separation](#bug-fix-stdoutstderr-separation)
+11. [Testing strategy](#testing-strategy)
+12. [Out of scope / deferred](#out-of-scope--deferred)
+13. [Glossary](#glossary)
 
 ---
 
@@ -337,6 +338,97 @@ without descriptions. spr would just be duplicating jj's safety.
 The integration test
 `TestJjIntegration_PushBranches_ConflictedCommit_Refused` pins this — if
 jj ever loosens this default, we want to catch it.
+
+---
+
+## Cascade-orphan recovery
+
+### The problem
+
+When `spr merge` runs against a stack, GitHub's API is given exactly one
+PR to squash-merge: the topmost mergeable PR (or the Nth, with
+`--count`). Because each stacked PR's branch contains the cumulative
+content of every PR beneath it, that single squash-merge absorbs the
+*entire* unmerged sub-stack into one commit on trunk. spr then closes
+every PR below the merged one with a "✓ Commit merged in #N" comment
+(`spr/spr.go::MergePullRequests`). On GitHub these closed PRs have
+`state: CLOSED` and `merged_at: null` — they're closed without a real
+merge event. We call them **orphan PRs**.
+
+In **git mode**, this is invisible: `spr update` runs `git fetch + git
+rebase`, and git's default patch-id detection drops local commits whose
+patches are already in trunk. The local stack self-heals.
+
+In **jj mode**, plain `jj rebase` does not patch-id-drop absorbed
+commits. Two failure modes appear:
+
+1. **Empty stubs.** When the local commit's diff is *exactly* contained
+   in the upstream squash, jj's 3-way rebase makes the local commit
+   empty but keeps it. The stack accumulates `[EMPTY]` placeholders.
+
+2. **Conflicts.** When the local commit's diff *overlaps* with the
+   cumulative squash but is not bit-identical (because multiple PRs
+   touched the same file in series, or the orphan commit was amended
+   locally after the squash landed), jj's 3-way merge produces
+   `[CONFLICT]` markers. Descendants inherit the conflict, so a single
+   orphan can poison the entire stack. This is the form the polis
+   stack hit.
+
+`vcs/jj_cascade_integration_test.go::TestJjMode_CascadeOrphans`
+characterizes both forms across 6 sub-tests.
+
+### What spr does about it
+
+Two changes layered on top of `jj rebase`:
+
+- **`--skip-emptied`** (`vcs/jj_ops.go::FetchAndRebase`). Matches git
+  rebase's patch-id self-healing for the clean case. Drops commits that
+  end up empty after the rebase. Fixes the empty-stubs variant on its
+  own.
+
+- **Pre-rebase abandon of orphan local commits**
+  (`spr/spr.go::identifyOrphanChangeIDs` →
+  `vcs/jj_ops.go::AbandonChangeIDs`). On every `spr update`, spr
+  queries GitHub for PRs in state `CLOSED` whose head ref matches the
+  spr branch prefix (`github.GetClosedOrphanPRs`), maps them to local
+  change IDs via the `commit-id:` trailer, and runs `jj abandon <id>`
+  for each — *before* the rebase. This prevents both failure modes,
+  because the orphan commits no longer exist in the local stack when
+  rebase runs.
+
+The two work together: `--skip-emptied` handles edge cases where the
+GitHub query missed an orphan (network blip, branch prefix mismatch),
+abandon handles the structural-overlap case where `--skip-emptied`
+alone wouldn't be enough.
+
+### Opt-out
+
+Set `noPruneOrphans: true` in `.spr.yml` (or `~/.spr.yml`) to skip
+orphan detection. Useful if you want to inspect closed-not-merged PRs
+manually before their local copies vanish, or if you don't trust the
+GitHub-side signal in your environment. With it on, `spr update`
+behaves as before Phase 2c — `--skip-emptied` still handles the clean
+cascade, but the drift / structural-overlap conflict cases will need
+manual `jj abandon`.
+
+### When you'd still need manual recovery
+
+- **You merged from another machine and now run `spr update` here.**
+  GitHub state is up to date, spr will detect the orphans, no manual
+  steps needed.
+- **You merged via the GitHub web UI bypassing spr.** Same — spr's
+  detection is GitHub-side, not state-file-side, so any merge source
+  is caught.
+- **You edited an orphan commit before any `spr update`.** Detection
+  is still automatic; the abandon runs before rebase regardless of
+  whether the local commit drifted.
+- **The orphan commit has descendants you don't want to lose.** jj's
+  abandon preserves descendants' content (their patches are re-applied
+  during auto-rebase). If you're worried, snapshot first with `jj op
+  log` and `jj op restore` if anything goes wrong.
+
+`handoffs/HANDOFF_SQUASH_CASCADE_ORPHANS.md` has the full incident
+report from the polis stack that motivated this work.
 
 ---
 

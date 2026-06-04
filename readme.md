@@ -264,6 +264,7 @@ defaultReviewers:
 | `deleteMergedBranches` | bool | `false` | Delete branches after PRs are merged |
 | `branchPrefix` | str | `spr` | Prefix for spr-managed branch names |
 | `noJJ` | bool | `false` | Disable jj (Jujutsu) mode in jj-colocated repos (also `--no-jj` flag or `SPR_NOJJ` env var) |
+| `noPruneOrphans` | bool | `false` | jj mode only. Skip auto-abandon of local commits whose PR was closed-without-merge on GitHub (typically by an upstream squash absorbing them). With this off — the default — `spr update` self-recovers the stack; with it on, you'll need to `jj abandon` orphan commits manually. See [Cascade-orphan recovery](docs/jj-mode-design.md#cascade-orphan-recovery). |
 
 </details>
 
@@ -321,6 +322,19 @@ After `jj spr edit` runs, `@` is on the chosen commit. Modify files and they're 
 Running: jj git fetch
 done. To also rebase onto the latest trunk, use `jj spr update`.
 ```
+
+### Merging mid-stack and cascade-orphan recovery
+
+When you `spr merge` a PR that's not at the bottom of the stack (typically via `--count N` to merge several at once, or because lower PRs aren't yet mergeable), GitHub squashes that one PR but absorbs the cumulative content of *every* PR underneath it. spr closes those lower PRs with a "✓ Commit merged in #N" comment; on GitHub they end up `state: CLOSED, merged_at: null` — closed without a real merge event. We call them **orphan PRs**.
+
+In git mode the local stack self-heals on the next `spr update` (git rebase drops absorbed commits via patch-id detection). In jj mode the orphan commits would normally linger as `[EMPTY]` stubs or — worse — produce `[CONFLICT]` markers that poison every descendant, blocking further updates. `jj spr update` handles this automatically:
+
+1. Queries GitHub for closed-not-merged PRs matching the spr branch prefix.
+2. Maps them to local change IDs via the `commit-id:` trailer.
+3. `jj abandon`s the matching local commits before rebase.
+4. Rebases the remaining stack with `--skip-emptied` for belt-and-braces.
+
+You shouldn't normally need to think about this — it's a safety net that fires only when there are orphans to clean up. If you want to inspect orphans before they vanish, set `noPruneOrphans: true` in `.spr.yml` and use `jj abandon` manually. Full mechanism in [docs/jj-mode-design.md](docs/jj-mode-design.md#cascade-orphan-recovery).
 
 ### Non-linear stacks
 
