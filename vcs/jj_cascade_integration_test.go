@@ -115,7 +115,7 @@ func TestJjOps_FetchAndRebase_SelfHealsCleanCascade(t *testing.T) {
 		"file_c.txt": "c-content\n",
 	})
 
-	if err := repo.JjOps.FetchAndRebase(repo.Cfg); err != nil {
+	if err := repo.JjOps.FetchAndRebase(repo.Cfg, nil); err != nil {
 		t.Fatalf("FetchAndRebase: %v", err)
 	}
 
@@ -138,6 +138,107 @@ func TestJjOps_FetchAndRebase_SelfHealsCleanCascade(t *testing.T) {
 	}
 	if stack[0].conflict {
 		t.Errorf("D should not be in conflict after rebase; row: %+v", stack[0])
+	}
+}
+
+// TestJjOps_FetchAndRebase_OrphanPrune_ResolvesDrift exercises the
+// orphan-abandon path on the drift scenario (orphan commit amended
+// locally after S landed). Vanilla rebase + --skip-emptied alone leaves
+// A conflicted and D inheriting; passing A as an orphan into
+// FetchAndRebase abandons it before rebase, so D rebases clean onto S.
+func TestJjOps_FetchAndRebase_OrphanPrune_ResolvesDrift(t *testing.T) {
+	repo := jjtest.NewRepo(t)
+
+	a := repo.AddCommitFile(t, "A: add file_a", "file_a.txt", "a-content\n", true)
+	repo.AddCommitFile(t, "B: add file_b", "file_b.txt", "b-content\n", true)
+	repo.AddCommitFile(t, "C: add file_c", "file_c.txt", "c-content\n", true)
+	d := repo.AddCommitFile(t, "D: add file_d", "file_d.txt", "d-content\n", true)
+
+	repo.PushSquashToOrigin(t, "S: squash of A+B+C", map[string]string{
+		"file_a.txt": "a-content\n",
+		"file_b.txt": "b-content\n",
+		"file_c.txt": "c-content\n",
+	})
+
+	// Drift injection — same shape as TestJjMode_CascadeOrphans drift variant.
+	repo.Edit(t, a)
+	if err := writeFile(t, repo.Path, "file_a.txt", "a-content-AMENDED\n"); err != nil {
+		t.Fatalf("amend file_a.txt: %v", err)
+	}
+	repo.Edit(t, d)
+
+	// Pass A as an orphan; B and C don't need to be passed because
+	// --skip-emptied will drop them (their content is fully in S).
+	if err := repo.JjOps.FetchAndRebase(repo.Cfg, []string{a}); err != nil {
+		t.Fatalf("FetchAndRebase with orphan A: %v", err)
+	}
+
+	rows := parseJjStack(t, repo.Path, "trunk()..(@:: | ::@)")
+	t.Logf("post-rebase stack:\n%s", formatJjRows(rows))
+
+	var stack []jjRow
+	for _, r := range rows {
+		if r.desc != "" {
+			stack = append(stack, r)
+		}
+	}
+	if len(stack) != 1 {
+		t.Fatalf("expected exactly 1 user-stack commit (D only), got %d:\n%s",
+			len(stack), formatJjRows(rows))
+	}
+	if !strings.HasPrefix(stack[0].desc, "D:") {
+		t.Errorf("expected D to survive, got %q", stack[0].desc)
+	}
+	if stack[0].conflict {
+		t.Errorf("D should not be in conflict after orphan-abandon resolves drift; row: %+v", stack[0])
+	}
+}
+
+// TestJjOps_FetchAndRebase_OrphanPrune_ResolvesStructuralOverlap is the
+// closest match to the polis production form. All four PRs modify the
+// same shared file with cumulative additions; S contains the A+B+C
+// cumulative diff. Without orphan-abandon, A and B conflict on rebase
+// even with --skip-emptied. With A/B/C passed as orphans, the rebase
+// only places D on top of S — clean.
+func TestJjOps_FetchAndRebase_OrphanPrune_ResolvesStructuralOverlap(t *testing.T) {
+	repo := jjtest.NewRepo(t)
+
+	const lineA = "from-A: contribution\n"
+	const lineB = "from-B: contribution\n"
+	const lineC = "from-C: contribution\n"
+	const lineD = "from-D: contribution\n"
+
+	a := repo.AddCommitFile(t, "A: init journal.md", "journal.md", lineA, true)
+	b := repo.AddCommitFile(t, "B: extend journal.md", "journal.md", lineA+lineB, true)
+	c := repo.AddCommitFile(t, "C: extend journal.md", "journal.md", lineA+lineB+lineC, true)
+	_ = repo.AddCommitFile(t, "D: extend journal.md", "journal.md", lineA+lineB+lineC+lineD, true)
+
+	repo.PushSquashToOrigin(t, "S: squash of A+B+C (PR-C merged)", map[string]string{
+		"journal.md": lineA + lineB + lineC,
+	})
+
+	if err := repo.JjOps.FetchAndRebase(repo.Cfg, []string{a, b, c}); err != nil {
+		t.Fatalf("FetchAndRebase with orphan A/B/C: %v", err)
+	}
+
+	rows := parseJjStack(t, repo.Path, "trunk()..(@:: | ::@)")
+	t.Logf("post-rebase stack:\n%s", formatJjRows(rows))
+
+	var stack []jjRow
+	for _, r := range rows {
+		if r.desc != "" {
+			stack = append(stack, r)
+		}
+	}
+	if len(stack) != 1 {
+		t.Fatalf("expected exactly 1 user-stack commit (D only), got %d:\n%s",
+			len(stack), formatJjRows(rows))
+	}
+	if !strings.HasPrefix(stack[0].desc, "D:") {
+		t.Errorf("expected D to survive, got %q", stack[0].desc)
+	}
+	if stack[0].conflict {
+		t.Errorf("D should not be in conflict after orphan-abandon resolves structural overlap; row: %+v", stack[0])
 	}
 }
 

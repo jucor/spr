@@ -694,7 +694,9 @@ func sortPullRequestsByLocalCommitOrder(pullRequests []*github.PullRequest, loca
 }
 
 func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubInfo {
-	err := sd.vcsOps.FetchAndRebase(sd.config)
+	// Phase 2c will populate orphanChangeIDs from PR state; passing nil now
+	// matches the pre-2a behavior (no orphans to abandon).
+	err := sd.vcsOps.FetchAndRebase(sd.config, nil)
 	if err != nil {
 		return nil
 	}

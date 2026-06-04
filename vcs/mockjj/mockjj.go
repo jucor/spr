@@ -112,6 +112,20 @@ func (m *Mock) ExpectSquash(changeID string) {
 	m.expect(fmt.Sprintf("jj squash --into %s", changeID))
 }
 
+// ExpectAbandon expects a jj abandon <change-id> command. Used by tests
+// that exercise FetchAndRebase's orphan-prune path or AbandonChangeIDs
+// directly. One call per change ID, in the same order the caller passed.
+func (m *Mock) ExpectAbandon(changeID string) {
+	m.expect(fmt.Sprintf("jj abandon %s", changeID))
+}
+
+// ExpectAbandonAndFail expects a jj abandon <change-id> and returns an
+// error, so callers can verify that FetchAndRebase short-circuits on
+// abandon failure rather than proceeding into rebase with a stale stack.
+func (m *Mock) ExpectAbandonAndFail(changeID string, err error) {
+	m.expect(fmt.Sprintf("jj abandon %s", changeID)).respondWithError(err)
+}
+
 // ExpectEdit expects a jj edit command.
 func (m *Mock) ExpectEdit(changeID string) {
 	m.expect(fmt.Sprintf("jj edit %s", changeID))
