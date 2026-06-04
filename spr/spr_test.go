@@ -1372,6 +1372,77 @@ func TestEditCommit_AlreadyEditing_UsesCommandName(t *testing.T) {
 	}
 }
 
+// TestEditCommit_JjMode_AnnouncesAndRunsJjEdit pins the new jj-mode UX:
+// after the user picks a commit, spr announces what it is doing and
+// actually runs `jj edit <change-id>` via EditStart so @ moves to the
+// target commit. User then just modifies files.
+func TestEditCommit_JjMode_AnnouncesAndRunsJjEdit(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+
+	stub := &stubVcsOps{
+		editing:     false,
+		commandName: "jj spr",
+		commits: []git.Commit{
+			{
+				CommitID:   "00000001",
+				CommitHash: "c100000000000000000000000000000000000000",
+				ChangeID:   "jjchangeabc",
+				Subject:    "test commit",
+			},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	input := bytes.NewBufferString("1\n")
+	s.input = input
+
+	s.EditCommit(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "jj edit jjchangeabc", "announces the jj edit command being run")
+	require.Contains(t, out, "jj undo", "instructs how to revert")
+	require.NotContains(t, out, "jj spr edit --done", "no session flags in jj mode")
+	require.NotContains(t, out, "jj spr edit --abort", "no session flags in jj mode")
+	require.True(t, stub.editStartCalled, "EditStart MUST be called in jj mode to run jj edit")
+}
+
+// TestEditCommit_JjMode_EditError_PrintsErrorMessage pins error reporting:
+// if jj edit fails (e.g. commit is immutable), spr prints the error clearly
+// and exits without further output.
+func TestEditCommit_JjMode_EditError_PrintsErrorMessage(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+
+	stub := &stubVcsOps{
+		editing:        false,
+		commandName:    "jj spr",
+		editStartError: fmt.Errorf("commit is immutable"),
+		commits: []git.Commit{
+			{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000",
+				ChangeID: "jjchangeabc", Subject: "test commit"},
+		},
+	}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+	input := bytes.NewBufferString("1\n")
+	s.input = input
+
+	s.EditCommit(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "immutable", "surfaces the jj error to the user")
+	require.NotContains(t, out, "jj undo", "no follow-up instructions when edit failed")
+}
+
 // TestEditCommit_GitMode_CallsEditStart pins that git mode's behavior is
 // unchanged: EditStart is called and the session-style instructions are
 // printed.
@@ -1401,6 +1472,92 @@ func TestEditCommit_GitMode_CallsEditStart(t *testing.T) {
 	require.Contains(t, out, "git spr edit --done")
 	require.Contains(t, out, "git spr edit --abort")
 	require.True(t, stub.editStartCalled, "EditStart must be called in git mode")
+}
+
+// --- SyncStack in jj mode ---
+//
+// SyncStack uses literal `git cherry-pick` and is broken under jj. In jj
+// mode it becomes echo-only: point the user at `jj git fetch` and skip the
+// dangerous git call.
+
+func TestSyncStack_JjMode_RunsJjGitFetch(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	// No mockgit expectations set — if SyncStack tries to run git cherry-pick,
+	// the mock will fail with "Unexpected command", proving the jj branch
+	// returned early.
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{commandName: "jj spr"}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.SyncStack(context.Background())
+
+	out := output.String()
+	require.True(t, stub.fetchCalled, "Fetch() must be called in jj mode")
+	require.Contains(t, out, "jj git fetch", "announces what it's running")
+	// "rebase onto trunk" is `spr update`'s job, not sync's — must NOT promise it
+	require.NotContains(t, out, "jj rebase")
+}
+
+func TestSyncStack_JjMode_FetchError_PrintsError(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	stub := &stubVcsOps{commandName: "jj spr", fetchError: fmt.Errorf("network is down")}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.SyncStack(context.Background())
+
+	require.Contains(t, output.String(), "network is down")
+}
+
+// --- EditCommitDone / EditCommitAbort in jj mode ---
+//
+// jj has no edit sessions. These flags become echo-only deprecations:
+// print instructions for the native jj equivalent (jj new / jj undo), and
+// do NOT call the VCS-layer methods.
+
+func TestEditCommitDone_JjMode_EchoOnly(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "jj spr", editing: true}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitDone(context.Background(), false)
+
+	out := output.String()
+	require.Contains(t, out, "jj new")
+	require.Contains(t, out, "jj undo")
+	require.False(t, stub.editFinishCalled, "EditFinish must NOT be called in jj mode")
+}
+
+func TestEditCommitAbort_JjMode_EchoOnly(t *testing.T) {
+	cfg := config.EmptyConfig()
+	cfg.Repo.GitHubBranch = "master"
+	gitmock := mockgit.NewMockGit(t)
+	githubmock := mockclient.NewMockClient(t)
+	githubmock.Info = &github.GitHubInfo{UserName: "test", RepositoryID: "repo", LocalBranch: "master"}
+	stub := &stubVcsOps{commandName: "jj spr", editing: true}
+	s := NewStackedPR(cfg, githubmock, gitmock, stub)
+	output := &bytes.Buffer{}
+	s.output = output
+
+	s.EditCommitAbort(context.Background())
+
+	out := output.String()
+	require.Contains(t, out, "jj undo")
+	require.False(t, stub.editAbortCalled, "EditAbort must NOT be called in jj mode")
 }
 
 func TestEditCommitDone_GitMode_EditFinishError(t *testing.T) {
