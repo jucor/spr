@@ -41,6 +41,24 @@ func (c *MockClient) GetInfo(ctx context.Context, gitcmd git.GitInterface) *gith
 	return c.Info
 }
 
+// MockClientClosedOrphans is the canned response GetClosedOrphanPRs returns.
+// Tests populate this when they need to exercise orphan-detection paths;
+// nil / empty means "no orphans" (matching production's "no closed PRs"
+// case). Package-level so existing fixtures can opt in with one line
+// without touching every UpdatePullRequests test.
+var MockClientClosedOrphans []*github.PullRequest
+
+// GetClosedOrphanPRs is intentionally NOT expectation-verified — it's a
+// pure read of GitHub PR state that fetchAndGetGitHubInfo calls on every
+// `spr update`. Verifying it would require updating dozens of existing
+// fixtures with `ExpectGetClosedOrphanPRs()` that they don't otherwise
+// care about. Tests that DO care about the call can assert on
+// MockClientClosedOrphans being non-empty or check the print trace.
+func (c *MockClient) GetClosedOrphanPRs(ctx context.Context) []*github.PullRequest {
+	fmt.Printf("HUB: GetClosedOrphanPRs\n")
+	return MockClientClosedOrphans
+}
+
 func (c *MockClient) GetAssignableUsers(ctx context.Context) []github.RepoAssignee {
 	fmt.Printf("HUB: GetAssignableUsers\n")
 	c.verifyExpectation(expectation{
