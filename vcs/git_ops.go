@@ -1,0 +1,200 @@
+package vcs
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/ejoffe/spr/config"
+	"github.com/ejoffe/spr/git"
+)
+
+// ErrRebaseConflict is returned by EditFinish when `git rebase --continue`
+// reports an unresolved conflict. The spr layer uses errors.Is to detect
+// it and print the original "Resolve conflicts and run '<cmd> edit --done'
+// again." recovery hint — preserving pre-refactor UX exactly.
+var ErrRebaseConflict = errors.New("rebase conflict")
+
+// GitOps implements VCSOperations using standard git commands.
+// This is a pure extraction of the existing logic from spr.go and helpers.go.
+type GitOps struct {
+	cfg    *config.Config
+	gitcmd git.GitInterface
+}
+
+// NewGitOps creates a git-based VCSOperations implementation.
+func NewGitOps(cfg *config.Config, gitcmd git.GitInterface) *GitOps {
+	return &GitOps{cfg: cfg, gitcmd: gitcmd}
+}
+
+// Fetch runs `git fetch` without rebasing.
+func (g *GitOps) Fetch() error {
+	return g.gitcmd.Git("fetch", nil)
+}
+
+// FetchAndRebase fetches from remote and rebases the local stack.
+// Extracted from spr.go fetchAndGetGitHubInfo().
+func (g *GitOps) FetchAndRebase(cfg *config.Config) error {
+	if cfg.Repo.ForceFetchTags {
+		g.gitcmd.MustGit("fetch --tags --force", nil)
+	} else {
+		g.gitcmd.MustGit("fetch", nil)
+	}
+	rebaseCommand := fmt.Sprintf("rebase %s/%s --autostash",
+		cfg.Repo.GitHubRemote, cfg.Repo.GitHubBranch)
+	return g.gitcmd.Git(rebaseCommand, nil)
+}
+
+// GetLocalCommitStack returns the local commit stack using git log.
+// Delegates to the existing git.GetLocalCommitStack function. Never
+// errors in git mode — the error in the interface is for jj-mode
+// failure modes (e.g. trying to add a commit-id trailer to an
+// immutable commit).
+func (g *GitOps) GetLocalCommitStack() ([]git.Commit, error) {
+	return git.GetLocalCommitStack(g.cfg, g.gitcmd), nil
+}
+
+// AmendInto creates a fixup commit and autosquashes it into the target.
+// Extracted from spr.go AmendCommit().
+func (g *GitOps) AmendInto(commit git.Commit) error {
+	g.gitcmd.MustGit("commit --fixup "+commit.CommitHash, nil)
+	rebaseCmd := fmt.Sprintf("rebase -i --autosquash --autostash %s/%s",
+		g.cfg.Repo.GitHubRemote, g.cfg.Repo.GitHubBranch)
+	g.gitcmd.MustGit(rebaseCmd, nil)
+	return nil
+}
+
+// EditStart begins an interactive edit session on a commit.
+// Extracted from spr.go EditCommit().
+func (g *GitOps) EditStart(commit git.Commit) error {
+	// Write state file
+	stateContent := fmt.Sprintf("commit_id=%s\ncommit_subject=%s\n", commit.CommitID, commit.Subject)
+	err := os.WriteFile(g.EditStatePath(), []byte(stateContent), 0644)
+	if err != nil {
+		return err
+	}
+
+	// Use the spr binary as the sequence editor to rewrite 'pick' to 'edit'
+	exe, err := os.Executable()
+	if err != nil {
+		os.Remove(g.EditStatePath())
+		return err
+	}
+	editorCmd := fmt.Sprintf("%s _edit-sequence %s", exe, commit.CommitHash[:7])
+
+	rebaseCmd := fmt.Sprintf("rebase -i --autostash %s/%s",
+		g.cfg.Repo.GitHubRemote, g.cfg.Repo.GitHubBranch)
+	err = g.gitcmd.GitWithEditor(rebaseCmd, nil, editorCmd)
+	if err != nil {
+		os.Remove(g.EditStatePath())
+		return err
+	}
+	return nil
+}
+
+// EditFinish completes an edit session.
+//
+// Two cases need to be distinguished:
+//   - Initial edit stop: the rebase paused at the chosen commit via `edit`.
+//     User has modified files; we amend the commit then continue.
+//   - Conflict resolution: rebase paused later while replaying commits above
+//     the edited one and hit a merge conflict. User has resolved it; we just
+//     continue. Amending here would squash the resolved commit's changes
+//     into the previous commit (the bug fixed upstream in 606df435).
+//
+// Git creates .git/REBASE_HEAD only in the conflict case, so its existence
+// is the distinguishing signal.
+//
+// `git add -u` (not -A) stages only modifications/deletions to tracked files,
+// avoiding accidentally staging untracked scratch files (upstream fix 0767a458).
+func (g *GitOps) EditFinish() error {
+	g.gitcmd.MustGit("add -u", nil)
+
+	rebaseHeadPath := filepath.Join(g.gitcmd.RootDir(), ".git", "REBASE_HEAD")
+	_, rebaseHeadErr := os.Stat(rebaseHeadPath)
+	isConflictResolution := rebaseHeadErr == nil
+
+	if !isConflictResolution {
+		err := g.gitcmd.Git("commit --amend --no-edit", nil)
+		if err != nil {
+			return fmt.Errorf("failed to amend commit: %w", err)
+		}
+	}
+
+	err := g.gitcmd.Git("rebase --continue", nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrRebaseConflict, err)
+	}
+	os.Remove(g.EditStatePath())
+	return nil
+}
+
+// EditAbort cancels the current edit session.
+// Extracted from spr.go EditCommitAbort().
+func (g *GitOps) EditAbort() error {
+	err := g.gitcmd.Git("rebase --abort", nil)
+	if err != nil {
+		return fmt.Errorf("failed to abort rebase: %w", err)
+	}
+	os.Remove(g.EditStatePath())
+	return nil
+}
+
+// PrepareForPush stashes uncommitted changes and returns a cleanup function.
+// Extracted from spr.go syncCommitStackToGitHub().
+func (g *GitOps) PrepareForPush() (func(), error) {
+	var output string
+	g.gitcmd.MustGit("status --porcelain --untracked-files=no", &output)
+	if output != "" {
+		err := g.gitcmd.Git("stash", nil)
+		if err != nil {
+			return nil, err
+		}
+		return func() { g.gitcmd.MustGit("stash pop", nil) }, nil
+	}
+	return func() {}, nil
+}
+
+// IsEditing returns true if an edit session is in progress.
+func (g *GitOps) IsEditing() bool {
+	_, err := os.Stat(g.EditStatePath())
+	return err == nil
+}
+
+// EditStatePath returns the path to the edit state file.
+func (g *GitOps) EditStatePath() string {
+	return filepath.Join(g.gitcmd.RootDir(), ".git", "spr_edit_state")
+}
+
+// PushBranches force-pushes spr branches for updated commits via git.
+func (g *GitOps) PushBranches(cfg *config.Config, commits []git.Commit, individually bool) error {
+	var refNames []string
+	for _, commit := range commits {
+		branchName := git.BranchNameFromCommit(cfg, commit)
+		refNames = append(refNames, commit.CommitHash+":refs/heads/"+branchName)
+	}
+	if individually {
+		for _, refName := range refNames {
+			pushCommand := fmt.Sprintf("push --force %s %s", cfg.Repo.GitHubRemote, refName)
+			g.gitcmd.MustGit(pushCommand, nil)
+		}
+	} else {
+		pushCommand := fmt.Sprintf("push --force --atomic %s %s",
+			cfg.Repo.GitHubRemote, strings.Join(refNames, " "))
+		g.gitcmd.MustGit(pushCommand, nil)
+	}
+	return nil
+}
+
+// CheckStackCompleteness is a no-op for git. The detached-HEAD case is already
+// caught by the branch name check in fetchAndGetGitHubInfo.
+func (g *GitOps) CheckStackCompleteness() string {
+	return ""
+}
+
+func (g *GitOps) CommandName() string {
+	return "git spr"
+}
+
