@@ -52,7 +52,7 @@ That's it. Each commit is a PR. Amend a commit and run `git spr update` again to
 | `git spr check`   |           | Run pre-merge checks (configured by `mergeCheck`) |
 | `git spr version` |           | Show version info |
 
-**Global flags:** `--detail` (show status bit headers), `--verbose` (log git commands and GitHub API calls), `--debug`, `--profile`
+**Global flags:** `--detail` (show status bit headers), `--verbose` (log git commands and GitHub API calls), `--no-jj` (disable jj mode), `--debug`, `--profile`
 
 ## Installation
 
@@ -151,7 +151,7 @@ Use `git spr edit` to start an interactive rebase session on a specific commit:
 Commit to edit [1-3]: 2
 ```
 
-Finish with `git spr edit --done` (add `-u` to also update). Cancel with `git spr edit --abort`.
+Finish with `git spr edit --done` (add `-u` to also update). Cancel with `git spr edit --abort`. In `jj` mode this works differently — see [Jujutsu (jj) Support](#jujutsu-jj-support) below.
 
 ### Syncing
 
@@ -263,8 +263,90 @@ defaultReviewers:
 | `noRebase` | bool | `false` | Skip rebasing on `git spr update` |
 | `deleteMergedBranches` | bool | `false` | Delete branches after PRs are merged |
 | `branchPrefix` | str | `spr` | Prefix for spr-managed branch names |
+| `noJJ` | bool | `false` | Disable jj (Jujutsu) mode in jj-colocated repos (also `--no-jj` flag or `SPR_NOJJ` env var) |
 
 </details>
+
+## Jujutsu (jj) Support
+
+spr supports [Jujutsu](https://jj-vcs.github.io/jj/) colocated repositories. When spr detects a `.jj/` directory in your repo root, it automatically uses jj-native commands for history-rewriting operations (`jj describe`, `jj rebase`, `jj squash`, `jj edit`) instead of `git rebase`. Change IDs are preserved across all spr operations. Everything else (push, branch management, GitHub API calls) continues to use git, which works identically in colocated repos.
+
+**Setup:**
+```shell
+jj git init --colocate              # initialize jj on top of your existing git repo
+git spr jj-setup                    # register the `jj spr` alias
+```
+
+Or set up the alias manually:
+```shell
+jj config set --user aliases.spr '["util", "exec", "--", "git-spr"]'
+```
+
+### Working with `jj spr`
+
+Most commands work identically to their `git spr` counterparts -- just substitute `jj` for `git`:
+```shell
+jj spr update          # create/update PRs
+jj spr status          # show PR status
+jj spr merge           # merge PRs
+jj spr amend           # amend a commit in the stack (uses `jj squash --into`)
+jj spr check           # run pre-merge checks
+```
+
+A consequence of jj's stable change IDs: spr finds your stack by *connected component*, not by working-copy position. You can leave `@` anywhere -- at the top of the stack, in the middle (e.g. after `jj edit`), or off to the side -- and `jj spr update` operates on the whole stack. No need to navigate back to the tip before running spr commands.
+
+### Editing commits in jj
+
+`jj spr edit` works differently from `git spr edit`. In `git` mode, editing starts an interactive rebase session that pauses on the chosen commit, requiring `--done` or `--abort` to finish. In `jj` mode, none of that scaffolding is needed: `jj edit` is instant and non-blocking, descendants are auto-rebased, and `jj undo` walks back any change.
+
+```shell
+> jj spr edit
+ 3 : 5cba235d : Feature 3
+ 2 : 4dc2c5b2 : Feature 2
+ 1 : 9d1b8193 : Feature 1
+Commit to edit [1-3]: 2
+
+Editing commit 2 (Feature 2): running `jj edit jjchange<id>`
+To revert any changes: jj undo
+```
+
+After `jj spr edit` runs, `@` is on the chosen commit. Modify files and they're auto-snapshotted into that commit; descendants are auto-rebased. To navigate back to the top of the stack, use `jj new <change-id>`. To undo the edit entirely, use `jj undo`. `--done` and `--abort` are accepted for compatibility but print a reminder that they're git-mode only.
+
+### Syncing in jj
+
+`jj spr sync` runs `jj git fetch` and exits. In jj's model, change IDs naturally align local and remote commits, so the cherry-pick logic that `git spr sync` uses is unnecessary.
+
+```shell
+> jj spr sync
+Running: jj git fetch
+done. To also rebase onto the latest trunk, use `jj spr update`.
+```
+
+### Merging mid-stack and cascade-orphan recovery
+
+When you `spr merge` a PR that's not at the bottom of the stack (typically via `--count N` to merge several at once, or because lower PRs aren't yet mergeable), GitHub squashes that one PR but absorbs the cumulative content of *every* PR underneath it. spr closes those lower PRs with a "✓ Commit merged in #N" comment; on GitHub they end up `state: CLOSED, merged_at: null` — closed without a real merge event. We call them **orphan PRs**.
+
+In git mode the local stack self-heals on the next `spr update` (git rebase drops absorbed commits via patch-id detection). In jj mode the orphan commits would normally linger as `[EMPTY]` stubs or — worse — produce `[CONFLICT]` markers that poison every descendant, blocking further updates. `jj spr update` handles this automatically:
+
+1. Queries GitHub for closed-not-merged PRs matching the spr branch prefix.
+2. Maps them to local change IDs via the `commit-id:` trailer.
+3. `jj abandon`s the matching local commits before rebase, with a user-visible notice naming each one and a `jj op restore` recovery hint.
+4. Rebases the remaining stack with `--skip-emptied` for belt-and-braces.
+
+This is parity with git mode, where `git rebase`'s patch-id detection silently drops absorbed commits on every `spr update`. Full mechanism in [docs/jj-mode-design.md](docs/jj-mode-design.md#cascade-orphan-recovery).
+
+### Non-linear stacks
+
+spr's data model is a linear stack. If your stack has multiple heads above trunk (e.g. you started a sibling chain with `jj new -r <mid> -m '...'`), spr refuses to operate and tells you to consolidate:
+
+```shell
+> jj spr update
+error: your stack is non-linear (2 heads above trunk): jjchange_a, jjchange_b. spr requires a linear stack -- use `jj rebase` or `jj edit` to consolidate.
+```
+
+Resolve with `jj rebase` to merge the chains, or `jj edit` into the one you want to operate on (the other is excluded automatically by the connected-component rule).
+
+**Opt-out:** If you have a `.jj/` directory but want spr to use git mode anyway: pass `--no-jj`, set `SPR_NOJJ=true`, or add `noJJ: true` to `~/.spr.yml`.
 
 ## How it compares
 
