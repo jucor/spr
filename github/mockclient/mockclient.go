@@ -41,6 +41,31 @@ func (c *MockClient) GetInfo(ctx context.Context, gitcmd git.GitInterface) *gith
 	return c.Info
 }
 
+// ClosedOrphans is the canned response GetClosedOrphanPRs returns. Tests
+// populate this when they need to exercise orphan-detection paths; nil /
+// empty means "no orphans" (matching the production "no closed PRs"
+// case).
+var MockClientClosedOrphans []*github.PullRequest
+
+func (c *MockClient) GetClosedOrphanPRs(ctx context.Context) []*github.PullRequest {
+	fmt.Printf("HUB: GetClosedOrphanPRs\n")
+	c.verifyExpectation(expectation{
+		op: getClosedOrphanPRsOP,
+	})
+	// Allow per-instance override via Info if needed in future; for now
+	// share the package-level slice so test setup is one line.
+	return MockClientClosedOrphans
+}
+
+func (c *MockClient) ExpectGetClosedOrphanPRs() {
+	c.expectMutex.Lock()
+	defer c.expectMutex.Unlock()
+
+	c.expect = append(c.expect, expectation{
+		op: getClosedOrphanPRsOP,
+	})
+}
+
 func (c *MockClient) GetAssignableUsers(ctx context.Context) []github.RepoAssignee {
 	fmt.Printf("HUB: GetAssignableUsers\n")
 	c.verifyExpectation(expectation{
@@ -243,14 +268,15 @@ func (c *MockClient) ExpectationsMet() {
 type operation string
 
 const (
-	getInfoOP            operation = "GetInfo"
-	getAssignableUsersOP operation = "GetAssignableUsers"
-	createPullRequestOP  operation = "CreatePullRequest"
-	updatePullRequestOP  operation = "UpdatePullRequest"
-	addReviewersOP       operation = "AddReviewers"
-	commentPullRequestOP operation = "CommentPullRequest"
-	mergePullRequestOP   operation = "MergePullRequest"
-	closePullRequestOP   operation = "ClosePullRequest"
+	getInfoOP             operation = "GetInfo"
+	getClosedOrphanPRsOP  operation = "GetClosedOrphanPRs"
+	getAssignableUsersOP  operation = "GetAssignableUsers"
+	createPullRequestOP   operation = "CreatePullRequest"
+	updatePullRequestOP   operation = "UpdatePullRequest"
+	addReviewersOP        operation = "AddReviewers"
+	commentPullRequestOP  operation = "CommentPullRequest"
+	mergePullRequestOP    operation = "MergePullRequest"
+	closePullRequestOP    operation = "ClosePullRequest"
 )
 
 type expectation struct {

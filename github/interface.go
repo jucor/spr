@@ -11,6 +11,21 @@ type GitHubInterface interface {
 	// GetInfo returns the list of pull requests from GitHub which match the local stack of commits
 	GetInfo(ctx context.Context, gitcmd git.GitInterface) *GitHubInfo
 
+	// GetClosedOrphanPRs returns PRs in state CLOSED-not-merged that match
+	// the user's spr branch prefix. These are "orphan" PRs whose content
+	// was absorbed by an upstream squash (the user ran `spr merge` on a
+	// PR higher up the stack, and GitHub closed the lower ones without a
+	// real merge event). Returned PRs have .Commit.CommitID populated
+	// from the HeadRefName so callers can match them to local commits
+	// without re-parsing trailers. Returns an empty slice if the query
+	// returns no matches; returns nil on transport error so callers can
+	// distinguish "no orphans" from "couldn't tell".
+	//
+	// Used by spr's update flow (cfg.User.NoPruneOrphans=false, default)
+	// to identify local change IDs that should be `jj abandon`-ed before
+	// rebase, avoiding the cascade-orphan conflict cascade.
+	GetClosedOrphanPRs(ctx context.Context) []*PullRequest
+
 	// GetAssignableUsers returns a list of valid GitHub users that can review the pull request
 	GetAssignableUsers(ctx context.Context) []RepoAssignee
 
