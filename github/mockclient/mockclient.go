@@ -41,29 +41,22 @@ func (c *MockClient) GetInfo(ctx context.Context, gitcmd git.GitInterface) *gith
 	return c.Info
 }
 
-// ClosedOrphans is the canned response GetClosedOrphanPRs returns. Tests
-// populate this when they need to exercise orphan-detection paths; nil /
-// empty means "no orphans" (matching the production "no closed PRs"
-// case).
+// MockClientClosedOrphans is the canned response GetClosedOrphanPRs returns.
+// Tests populate this when they need to exercise orphan-detection paths;
+// nil / empty means "no orphans" (matching production's "no closed PRs"
+// case). Package-level so existing fixtures can opt in with one line
+// without touching every UpdatePullRequests test.
 var MockClientClosedOrphans []*github.PullRequest
 
+// GetClosedOrphanPRs is intentionally NOT expectation-verified — it's a
+// pure read of GitHub PR state that fetchAndGetGitHubInfo calls on every
+// `spr update`. Verifying it would require updating dozens of existing
+// fixtures with `ExpectGetClosedOrphanPRs()` that they don't otherwise
+// care about. Tests that DO care about the call can assert on
+// MockClientClosedOrphans being non-empty or check the print trace.
 func (c *MockClient) GetClosedOrphanPRs(ctx context.Context) []*github.PullRequest {
 	fmt.Printf("HUB: GetClosedOrphanPRs\n")
-	c.verifyExpectation(expectation{
-		op: getClosedOrphanPRsOP,
-	})
-	// Allow per-instance override via Info if needed in future; for now
-	// share the package-level slice so test setup is one line.
 	return MockClientClosedOrphans
-}
-
-func (c *MockClient) ExpectGetClosedOrphanPRs() {
-	c.expectMutex.Lock()
-	defer c.expectMutex.Unlock()
-
-	c.expect = append(c.expect, expectation{
-		op: getClosedOrphanPRsOP,
-	})
 }
 
 func (c *MockClient) GetAssignableUsers(ctx context.Context) []github.RepoAssignee {
@@ -268,15 +261,14 @@ func (c *MockClient) ExpectationsMet() {
 type operation string
 
 const (
-	getInfoOP             operation = "GetInfo"
-	getClosedOrphanPRsOP  operation = "GetClosedOrphanPRs"
-	getAssignableUsersOP  operation = "GetAssignableUsers"
-	createPullRequestOP   operation = "CreatePullRequest"
-	updatePullRequestOP   operation = "UpdatePullRequest"
-	addReviewersOP        operation = "AddReviewers"
-	commentPullRequestOP  operation = "CommentPullRequest"
-	mergePullRequestOP    operation = "MergePullRequest"
-	closePullRequestOP    operation = "ClosePullRequest"
+	getInfoOP            operation = "GetInfo"
+	getAssignableUsersOP operation = "GetAssignableUsers"
+	createPullRequestOP  operation = "CreatePullRequest"
+	updatePullRequestOP  operation = "UpdatePullRequest"
+	addReviewersOP       operation = "AddReviewers"
+	commentPullRequestOP operation = "CommentPullRequest"
+	mergePullRequestOP   operation = "MergePullRequest"
+	closePullRequestOP   operation = "ClosePullRequest"
 )
 
 type expectation struct {

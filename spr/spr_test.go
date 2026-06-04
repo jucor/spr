@@ -1847,3 +1847,111 @@ func TestCheckStackUsable_Warning_PrintsErrorAndReturnsFalse(t *testing.T) {
 	require.Contains(t, output.String(), "non-linear")
 	require.NotContains(t, output.String(), "Continue anyway", "no Y/N prompt anymore")
 }
+
+// --- identifyOrphanChangeIDs (Phase 2c orphan-detection wiring) ---
+
+// orphanStubVcs is a minimal VCSOperations for testing identifyOrphanChangeIDs.
+// Only GetLocalCommitStack is used; everything else returns zero values.
+type orphanStubVcs struct {
+	commits []git.Commit
+}
+
+func (o *orphanStubVcs) GetLocalCommitStack(cfg *config.Config, gitcmd git.GitInterface) []git.Commit {
+	return o.commits
+}
+func (o *orphanStubVcs) FetchAndRebase(cfg *config.Config, orphans []string) error { return nil }
+func (o *orphanStubVcs) AbandonChangeIDs(changeIDs []string) error                  { return nil }
+func (o *orphanStubVcs) Fetch() error                                                { return nil }
+func (o *orphanStubVcs) AmendInto(commit git.Commit) error                           { return nil }
+func (o *orphanStubVcs) EditStart(commit git.Commit) error                           { return nil }
+func (o *orphanStubVcs) EditFinish() error                                           { return nil }
+func (o *orphanStubVcs) EditAbort() error                                            { return nil }
+func (o *orphanStubVcs) PrepareForPush() (func(), error)                             { return func() {}, nil }
+func (o *orphanStubVcs) PushBranches(cfg *config.Config, commits []git.Commit, individually bool) error {
+	return nil
+}
+func (o *orphanStubVcs) IsEditing() bool             { return false }
+func (o *orphanStubVcs) EditStatePath() string       { return "" }
+func (o *orphanStubVcs) CheckStackCompleteness() string { return "" }
+func (o *orphanStubVcs) CommandName() string         { return "jj spr" }
+
+func TestIdentifyOrphanChangeIDs(t *testing.T) {
+	tests := []struct {
+		name             string
+		noPruneOrphans   bool
+		orphanPRsByCID   []string // PR commit-id values
+		localCommits     []git.Commit
+		expectChangeIDs  []string
+	}{
+		{
+			name:           "NoPruneOrphans_short_circuits",
+			noPruneOrphans: true,
+			orphanPRsByCID: []string{"cid1"},
+			localCommits: []git.Commit{
+				{CommitID: "cid1", ChangeID: "jj-change-1"},
+			},
+			expectChangeIDs: nil,
+		},
+		{
+			name:            "no_orphans_returns_nil",
+			orphanPRsByCID:  nil,
+			localCommits:    []git.Commit{{CommitID: "cid1", ChangeID: "jj-change-1"}},
+			expectChangeIDs: nil,
+		},
+		{
+			name:           "orphan_matches_local_commit_returns_change_id",
+			orphanPRsByCID: []string{"cid1", "cid2"},
+			localCommits: []git.Commit{
+				{CommitID: "cid1", ChangeID: "jj-change-1"},
+				{CommitID: "cid2", ChangeID: "jj-change-2"},
+				{CommitID: "cid3", ChangeID: "jj-change-3"}, // not orphan
+			},
+			expectChangeIDs: []string{"jj-change-1", "jj-change-2"},
+		},
+		{
+			name:           "orphan_with_no_local_match_is_dropped",
+			orphanPRsByCID: []string{"cid-stale-from-other-machine"},
+			localCommits: []git.Commit{
+				{CommitID: "cid1", ChangeID: "jj-change-1"},
+			},
+			expectChangeIDs: nil,
+		},
+		{
+			name:           "local_commit_without_change_id_is_skipped",
+			orphanPRsByCID: []string{"cid1"},
+			localCommits: []git.Commit{
+				{CommitID: "cid1", ChangeID: ""}, // git-mode commit, no jj change ID
+			},
+			expectChangeIDs: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.EmptyConfig()
+			cfg.User.NoPruneOrphans = tc.noPruneOrphans
+
+			// Set up the canned orphan PR list on the mock.
+			origOrphans := mockclient.MockClientClosedOrphans
+			defer func() { mockclient.MockClientClosedOrphans = origOrphans }()
+			orphanPRs := make([]*github.PullRequest, 0, len(tc.orphanPRsByCID))
+			for _, cid := range tc.orphanPRsByCID {
+				orphanPRs = append(orphanPRs, &github.PullRequest{
+					Commit: git.Commit{CommitID: cid},
+				})
+			}
+			mockclient.MockClientClosedOrphans = orphanPRs
+
+			githubmock := mockclient.NewMockClient(t)
+			s := &stackediff{
+				config:  cfg,
+				github:  githubmock,
+				vcsOps:  &orphanStubVcs{commits: tc.localCommits},
+				gitcmd:  nil,
+			}
+
+			got := s.identifyOrphanChangeIDs(context.Background())
+			require.Equal(t, tc.expectChangeIDs, got)
+		})
+	}
+}

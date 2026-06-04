@@ -670,9 +670,18 @@ func sortPullRequestsByLocalCommitOrder(pullRequests []*github.PullRequest, loca
 }
 
 func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubInfo {
-	// Phase 2c will populate orphanChangeIDs from PR state; passing nil now
-	// matches the pre-2a behavior (no orphans to abandon).
-	err := sd.vcsOps.FetchAndRebase(sd.config, nil)
+	// Identify orphan local commits before fetching, so jj can `jj abandon`
+	// them in FetchAndRebase before the rebase step. An orphan is a local
+	// commit whose corresponding PR is in state CLOSED-not-merged on
+	// GitHub (the spr-merge code path closes them when a higher PR is
+	// squash-merged on the stack — see MergePullRequests). Without this
+	// pre-rebase abandon, jj's 3-way merge produces conflicts when the
+	// orphan's local diff overlaps with the squash's cumulative content
+	// (the polis production form). See docs/jj-mode-design.md for the
+	// full mechanism + design.
+	orphanChangeIDs := sd.identifyOrphanChangeIDs(ctx)
+
+	err := sd.vcsOps.FetchAndRebase(sd.config, orphanChangeIDs)
 	if err != nil {
 		return nil
 	}
@@ -688,6 +697,54 @@ func (sd *stackediff) fetchAndGetGitHubInfo(ctx context.Context) *github.GitHubI
 	}
 
 	return info
+}
+
+// identifyOrphanChangeIDs returns the local change IDs of commits whose
+// PRs are closed-but-not-merged on GitHub. This is the orphan signal the
+// jj-mode FetchAndRebase uses to `jj abandon` the local copies before
+// rebase, preventing the cascade-orphan conflict cascade.
+//
+// Honors cfg.User.NoPruneOrphans (default false): when true, returns nil
+// regardless of GitHub state.
+//
+// Returns nil (not empty) on any failure to query GitHub or read local
+// commits — nil is the safe default since FetchAndRebase treats it as
+// "no orphans to prune," matching pre-2a behavior. A loud failure here
+// would block all spr updates because the GitHub query is best-effort.
+func (sd *stackediff) identifyOrphanChangeIDs(ctx context.Context) []string {
+	if sd.config.User.NoPruneOrphans {
+		return nil
+	}
+	orphanPRs := sd.github.GetClosedOrphanPRs(ctx)
+	if len(orphanPRs) == 0 {
+		return nil
+	}
+	// Build a set of orphan commit-IDs (the spr ID, not the git hash) so we
+	// can do an O(1) lookup per local commit.
+	orphanSet := make(map[string]struct{}, len(orphanPRs))
+	for _, pr := range orphanPRs {
+		if pr.Commit.CommitID != "" {
+			orphanSet[pr.Commit.CommitID] = struct{}{}
+		}
+	}
+	if len(orphanSet) == 0 {
+		return nil
+	}
+
+	localCommits := sd.vcsOps.GetLocalCommitStack(sd.config, sd.gitcmd)
+	var changeIDs []string
+	for _, c := range localCommits {
+		if _, ok := orphanSet[c.CommitID]; !ok {
+			continue
+		}
+		if c.ChangeID == "" {
+			// jj change ID is required for `jj abandon`. Git-mode commits
+			// won't have one, so this path naturally skips in git mode.
+			continue
+		}
+		changeIDs = append(changeIDs, c.ChangeID)
+	}
+	return changeIDs
 }
 
 // syncCommitStackToGitHub gets all the local commits in the given branch

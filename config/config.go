@@ -57,6 +57,15 @@ type UserConfig struct {
 	NoRebase             bool `default:"false" yaml:"noRebase"`
 	NoFetch              bool `default:"false" yaml:"noFetch"`
 	NoJJ                 bool `default:"false" yaml:"noJJ"`
+	// NoPruneOrphans disables the jj-mode cascade-orphan recovery in
+	// spr update. When false (default), spr identifies local commits
+	// whose PR has been closed-without-merge on GitHub (typically by
+	// an upstream squash that absorbed their content) and `jj abandon`s
+	// them before rebase, avoiding the duplicate-content conflict
+	// cascade described in docs/jj-mode-design.md. Set true to skip
+	// this entirely if you don't trust the GitHub-side signal or want
+	// to investigate orphan commits manually before they're dropped.
+	NoPruneOrphans       bool `default:"false" yaml:"noPruneOrphans"`
 	DeleteMergedBranches bool `default:"false" yaml:"deleteMergedBranches"`
 	ShortPRLink          bool `default:"false" yaml:"shortPRLink"`
 	ShowCommitID         bool `default:"false" yaml:"showCommitID"`
