@@ -1875,3 +1875,132 @@ func TestCheckStackUsable_Warning_PrintsErrorAndReturnsFalse(t *testing.T) {
 	require.Contains(t, output.String(), "non-linear")
 	require.NotContains(t, output.String(), "Continue anyway", "no Y/N prompt anymore")
 }
+
+// --- identifyOrphanChangeIDs (Phase 2c orphan-detection wiring) ---
+
+// orphanStubVcs is a minimal VCSOperations for testing identifyOrphanChangeIDs.
+// Only GetLocalCommitStack is used; everything else returns zero values.
+type orphanStubVcs struct {
+	commits []git.Commit
+}
+
+func (o *orphanStubVcs) GetLocalCommitStack() ([]git.Commit, error) {
+	return o.commits, nil
+}
+func (o *orphanStubVcs) FetchAndRebase(cfg *config.Config, orphans []string) error { return nil }
+func (o *orphanStubVcs) AbandonChangeIDs(changeIDs []string) error                  { return nil }
+func (o *orphanStubVcs) Fetch() error                                                { return nil }
+func (o *orphanStubVcs) AmendInto(commit git.Commit) error                           { return nil }
+func (o *orphanStubVcs) EditStart(commit git.Commit) error                           { return nil }
+func (o *orphanStubVcs) EditFinish() error                                           { return nil }
+func (o *orphanStubVcs) EditAbort() error                                            { return nil }
+func (o *orphanStubVcs) PrepareForPush() (func(), error)                             { return func() {}, nil }
+func (o *orphanStubVcs) PushBranches(cfg *config.Config, commits []git.Commit, individually bool) error {
+	return nil
+}
+func (o *orphanStubVcs) IsEditing() bool             { return false }
+func (o *orphanStubVcs) EditStatePath() string       { return "" }
+func (o *orphanStubVcs) CheckStackCompleteness() string { return "" }
+func (o *orphanStubVcs) CommandName() string         { return "jj spr" }
+
+func TestIdentifyOrphanChangeIDs(t *testing.T) {
+	tests := []struct {
+		name            string
+		noRebase        bool // cfg.User.NoRebase
+		orphanPRsByCID  []string // PR commit-id values
+		localCommits    []git.Commit
+		expectChangeIDs []string
+		// expectNotice: when non-empty, identifyOrphanChangeIDs must print
+		// a user-visible notice naming each abandoned commit + a recovery
+		// hint. Asserted via substring contains.
+		expectNotice []string
+	}{
+		{
+			// NoRebase short-circuits FetchAndRebase to fetch-only; abandon
+			// never runs. Detection must skip the GitHub query AND the
+			// notice — otherwise the user sees "Abandoning..." for an
+			// abandon that doesn't happen.
+			name:            "NoRebase_skips_detection_silently",
+			noRebase:        true,
+			orphanPRsByCID:  []string{"cid1"},
+			localCommits:    []git.Commit{{CommitID: "cid1", ChangeID: "jj-change-1"}},
+			expectChangeIDs: nil,
+		},
+		{
+			name:            "no_orphans_returns_nil_and_silent",
+			orphanPRsByCID:  nil,
+			localCommits:    []git.Commit{{CommitID: "cid1", ChangeID: "jj-change-1"}},
+			expectChangeIDs: nil,
+		},
+		{
+			name:           "orphan_matches_local_commit_returns_change_id_and_notice",
+			orphanPRsByCID: []string{"cid1", "cid2"},
+			localCommits: []git.Commit{
+				{CommitID: "cid1", ChangeID: "jj-change-1", Subject: "Add login page"},
+				{CommitID: "cid2", ChangeID: "jj-change-2", Subject: "Add session mgmt"},
+				{CommitID: "cid3", ChangeID: "jj-change-3"}, // not orphan
+			},
+			expectChangeIDs: []string{"jj-change-1", "jj-change-2"},
+			expectNotice: []string{
+				"Detected 2 PR(s) closed-not-merged",
+				"Add login page",
+				"Add session mgmt",
+				"jj op restore",
+			},
+		},
+		{
+			name:            "orphan_with_no_local_match_is_dropped_and_silent",
+			orphanPRsByCID:  []string{"cid-stale-from-other-machine"},
+			localCommits:    []git.Commit{{CommitID: "cid1", ChangeID: "jj-change-1"}},
+			expectChangeIDs: nil,
+		},
+		{
+			name:           "local_commit_without_change_id_is_skipped_silently",
+			orphanPRsByCID: []string{"cid1"},
+			localCommits: []git.Commit{
+				{CommitID: "cid1", ChangeID: ""}, // git-mode commit, no jj change ID
+			},
+			expectChangeIDs: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.EmptyConfig()
+			cfg.User.NoRebase = tc.noRebase
+
+			// Set up the canned orphan PR list on the mock.
+			origOrphans := mockclient.MockClientClosedOrphans
+			defer func() { mockclient.MockClientClosedOrphans = origOrphans }()
+			orphanPRs := make([]*github.PullRequest, 0, len(tc.orphanPRsByCID))
+			for i, cid := range tc.orphanPRsByCID {
+				orphanPRs = append(orphanPRs, &github.PullRequest{
+					Number: 2509 + i,
+					Commit: git.Commit{CommitID: cid},
+				})
+			}
+			mockclient.MockClientClosedOrphans = orphanPRs
+
+			githubmock := mockclient.NewMockClient(t)
+			out := &bytes.Buffer{}
+			s := &stackediff{
+				config: cfg,
+				github: githubmock,
+				vcsOps: &orphanStubVcs{commits: tc.localCommits},
+				gitcmd: nil,
+				output: out,
+			}
+
+			got := s.identifyOrphanChangeIDs(context.Background())
+			require.Equal(t, tc.expectChangeIDs, got)
+			for _, want := range tc.expectNotice {
+				require.Contains(t, out.String(), want,
+					"notice must include %q so user can see what's happening", want)
+			}
+			if len(tc.expectNotice) == 0 {
+				require.Empty(t, out.String(),
+					"must be silent when there are no orphans to abandon")
+			}
+		})
+	}
+}
