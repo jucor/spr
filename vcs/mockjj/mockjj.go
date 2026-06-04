@@ -75,9 +75,11 @@ func (m *Mock) ExpectFetch() {
 	m.expect("jj git fetch")
 }
 
-// ExpectRebase expects a jj rebase command.
+// ExpectRebase expects a jj rebase command. Matches the form issued by
+// JjOps.FetchAndRebase, including the --skip-emptied flag that drops
+// patches absorbed into the new trunk (cascade-orphan empties).
 func (m *Mock) ExpectRebase(remote, branch string) {
-	m.expect(fmt.Sprintf("jj rebase -b @ -d %s@%s", branch, remote))
+	m.expect(fmt.Sprintf("jj rebase -b @ -d %s@%s --skip-emptied", branch, remote))
 }
 
 // ExpectLogAndRespond expects the jj log command and returns formatted output.
@@ -158,9 +160,10 @@ func (m *Mock) ExpectFetchAndFail(err error) {
 	m.expect("jj git fetch").respondWithError(err)
 }
 
-// ExpectRebaseAndFail expects `jj rebase -b @ -d branch@remote` and returns an error.
+// ExpectRebaseAndFail expects the rebase form issued by FetchAndRebase
+// (including --skip-emptied) and returns an error.
 func (m *Mock) ExpectRebaseAndFail(remote, branch string, err error) {
-	m.expect(fmt.Sprintf("jj rebase -b @ -d %s@%s", branch, remote)).respondWithError(err)
+	m.expect(fmt.Sprintf("jj rebase -b @ -d %s@%s --skip-emptied", branch, remote)).respondWithError(err)
 }
 
 // ExpectSquashAndFail expects `jj squash --into <changeID>` and returns an error.

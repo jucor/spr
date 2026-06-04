@@ -46,10 +46,22 @@ func (j *JjOps) FetchAndRebase(cfg *config.Config) error {
 		return err
 	}
 
-	// Rebase current stack onto updated trunk
+	// Rebase current stack onto updated trunk.
+	//
+	// --skip-emptied drops local commits whose patches were absorbed into
+	// the new trunk (e.g. siblings of a mid-stack squash-merge whose
+	// content is now in trunk via the squash). Without this, jj rebase
+	// would leave them around as `[EMPTY]` stubs — the clean form of the
+	// cascade-orphan bug. This matches the patch-id-based behavior of
+	// `git rebase` in git-mode FetchAndRebase. It does NOT help when an
+	// orphan's local diff has structurally drifted from the squashed
+	// version (overlapping but-different edits) — that case still
+	// produces conflicts and needs orphan-PR detection + `jj abandon`
+	// before fetch+rebase. See vcs/jj_cascade_integration_test.go for
+	// the full behavior matrix.
 	remote := cfg.Repo.GitHubRemote
 	branch := cfg.Repo.GitHubBranch
-	rebaseCmd := fmt.Sprintf("rebase -b @ -d %s@%s", branch, remote)
+	rebaseCmd := fmt.Sprintf("rebase -b @ -d %s@%s --skip-emptied", branch, remote)
 	return j.jjcmd.Jj(rebaseCmd, nil)
 }
 

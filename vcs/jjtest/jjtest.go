@@ -156,6 +156,54 @@ func (r Repo) Edit(t *testing.T, changeID string) {
 	mustRun(t, r.Path, "jj", "edit", changeID)
 }
 
+// AddCommitFile is like AddCommit but lets the caller pick a stable filename
+// and content. Useful for scenarios where the test needs the same bytes to
+// appear in multiple places (e.g. simulating a GitHub squash that absorbs
+// the same content as a local commit). Returns the change ID.
+func (r Repo) AddCommitFile(t *testing.T, subject, filename, content string, withTrailer bool) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(r.Path, filename), []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
+	}
+	desc := subject
+	if withTrailer {
+		desc += "\n\ncommit-id:" + randomToken(t)
+	}
+	mustRun(t, r.Path, "jj", "describe", "-m", desc)
+	changeID := r.At(t)
+	mustRun(t, r.Path, "jj", "new")
+	return changeID
+}
+
+// PushSquashToOrigin simulates a GitHub squash-merge landing on origin/master:
+// from a side worktree, builds a single commit whose tree contains the given
+// files (overlaid on current origin/master) and pushes it as the new
+// origin/master tip. The local colocated repo is unaffected until the caller
+// fetches. Returns the new origin/master tip SHA (short).
+func (r Repo) PushSquashToOrigin(t *testing.T, subject string, files map[string]string) string {
+	t.Helper()
+	side := t.TempDir()
+	mustRun(t, side, "git", "clone", r.RemotePath, ".")
+	mustRun(t, side, "git", "config", "user.name", "spr-test")
+	mustRun(t, side, "git", "config", "user.email", "spr-test@example.com")
+	mustRun(t, side, "git", "config", "commit.gpgsign", "false")
+
+	for name, content := range files {
+		full := filepath.Join(side, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		mustRun(t, side, "git", "add", name)
+	}
+	mustRun(t, side, "git", "commit", "-m", subject)
+	mustRun(t, side, "git", "push", "origin", "master")
+	sha := strings.TrimSpace(mustRun(t, side, "git", "rev-parse", "--short", "HEAD"))
+	return sha
+}
+
 // InsertAbove creates a new commit on top of @ with the given subject and
 // optional trailer. Unlike AddCommit, it does NOT touch @ itself — useful
 // for inserting mid-stack commits onto an existing real commit. Returns
