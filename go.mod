@@ -1,6 +1,6 @@
 module github.com/ejoffe/spr
 
-go 1.21
+go 1.25.0
 
 require (
 	github.com/ejoffe/profiletimer v0.1.0
@@ -14,7 +14,7 @@ require (
 	github.com/tidwall/pretty v1.2.0
 	github.com/urfave/cli/v2 v2.8.1
 	golang.org/x/oauth2 v0.0.0-20211104180415-d3ed0bb246c8
-	golang.org/x/sys v0.29.0
+	golang.org/x/sys v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -62,11 +62,11 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/zalando/go-keyring v0.2.8 // indirect
-	golang.org/x/crypto v0.32.0 // indirect
-	golang.org/x/mod v0.17.0 // indirect
-	golang.org/x/net v0.34.0 // indirect
-	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/mod v0.36.0 // indirect
+	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/tools v0.45.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.28.0 // indirect
