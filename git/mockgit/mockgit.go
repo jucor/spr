@@ -170,8 +170,8 @@ func (m *Mock) ExpectLocalBranch(name string) {
 }
 
 
-func (m *Mock) expect(cmd string, args ...interface{}) *Mock {
-	m.expectedCmd = append(m.expectedCmd, fmt.Sprintf(cmd, args...))
+func (m *Mock) expect(cmd string) *Mock {
+	m.expectedCmd = append(m.expectedCmd, cmd)
 	m.response = append(m.response, &commitResponse{valid: false})
 	m.errors = append(m.errors, nil)
 	return m
