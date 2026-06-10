@@ -102,22 +102,9 @@ func TestApplyDivergencePolicy_Ask_WithInjectedPromptAbort(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestApplyDivergencePolicy_Merge_FallsThroughToPromptWithNote(t *testing.T) {
-	// Stage 1: "merge" is reserved for Stage 2 and falls back to ask
-	// with a printed note.
-	sd := stubStackedDiff(config.OnRemoteDivergenceMerge)
-	out := &bytes.Buffer{}
-	sd.output = out
-	sd.divergencePromptFn = func(d []git.Divergence) DivergenceAction {
-		return DivergenceActionDrop
-	}
-
-	ok := sd.applyDivergencePolicy([]git.Divergence{{Reason: git.DivergenceForeignCommits}})
-
-	require.True(t, ok, "fall-through to drop via injected prompt")
-	require.Contains(t, out.String(), "Stage 2",
-		"merge policy must emit a 'reserved for Stage 2' note")
-}
+// (The Stage 1 test asserting that `merge` falls through to `ask` with a
+// "Stage 2 reserved" note is gone now that this PR implements the actual
+// fold. New behavior is covered in divergence_fold_test.go.)
 
 func TestApplyDivergencePolicy_EmptyPolicy_DefaultsToAsk(t *testing.T) {
 	sd := stubStackedDiff("") // empty config value

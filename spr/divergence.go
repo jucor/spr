@@ -80,11 +80,15 @@ func (sd *stackediff) applyDivergencePolicy(divergences []git.Divergence) bool {
 		return true
 
 	case config.OnRemoteDivergenceMerge:
-		// Stage 2 not implemented; fall through to interactive ask.
-		fmt.Fprintf(sd.output,
-			"note: onRemoteDivergence=merge is reserved for a Stage 2 follow-up;\n"+
-				"      falling back to interactive prompt for this run.\n")
-		fallthrough
+		folded, refused := sd.foldDivergences(divergences)
+		printFoldSummary(sd.output, folded, refused)
+		if len(refused) > 0 {
+			printResolutionGuide(sd.output, refused)
+			fmt.Fprintf(sd.output,
+				"\nRefusing to continue: resolve the unfoldable PR(s) above manually, then re-run.\n")
+			return false
+		}
+		return true
 
 	case config.OnRemoteDivergenceAsk:
 		return sd.promptDivergenceAction(divergences) == DivergenceActionDrop

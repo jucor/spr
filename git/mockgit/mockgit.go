@@ -207,6 +207,70 @@ type RemoteCommitFixture struct {
 	Body    string
 }
 
+// ExpectRevParseHead queues an expectation for `git rev-parse HEAD` and
+// responds with the given SHA + newline (matching real git output).
+func (m *Mock) ExpectRevParseHead(sha string) {
+	m.expect("git rev-parse HEAD").respond(sha + "\n")
+}
+
+// ExpectCherryPickNoCommit queues an expectation for
+// `git cherry-pick --no-commit <sha>` with a successful (no-output) response.
+func (m *Mock) ExpectCherryPickNoCommit(sha string) {
+	m.expect("git cherry-pick --no-commit " + sha)
+}
+
+// ExpectCherryPickNoCommitConflict queues the cherry-pick with a non-nil
+// error response, mimicking a git-side merge conflict. Production passes
+// a nil output buffer (it doesn't care about cherry-pick stdout), so the
+// mock uses the plain error path that asserts nil output.
+func (m *Mock) ExpectCherryPickNoCommitConflict(sha string) {
+	m.expectError("git cherry-pick --no-commit "+sha,
+		errors.New("CONFLICT (content): Merge conflict"))
+}
+
+// ExpectCherryPickAbort queues `git cherry-pick --abort` (no error).
+func (m *Mock) ExpectCherryPickAbort() {
+	m.expect("git cherry-pick --abort")
+}
+
+// ExpectResetHard queues `git reset --hard <sha>` (no error).
+func (m *Mock) ExpectResetHard(sha string) {
+	m.expect("git reset --hard " + sha)
+}
+
+// ExpectCheckoutDetach queues `git checkout --detach <sha>` (no error).
+func (m *Mock) ExpectCheckoutDetach(sha string) {
+	m.expect("git checkout --detach " + sha)
+}
+
+// ExpectCheckout queues `git checkout <sha>` (no error). Used by the
+// per-divergence rollback path to restore HEAD to the original tip.
+func (m *Mock) ExpectCheckout(sha string) {
+	m.expect("git checkout " + sha)
+}
+
+// ExpectCommitAmendNoEdit queues `git commit --amend --no-edit`.
+func (m *Mock) ExpectCommitAmendNoEdit() {
+	m.expect("git commit --amend --no-edit")
+}
+
+// ExpectRebaseOnto queues `git rebase --onto <newBase> <oldBase> <head>`.
+func (m *Mock) ExpectRebaseOnto(newBase, oldBase, head string) {
+	m.expect("git rebase --onto " + newBase + " " + oldBase + " " + head)
+}
+
+// ExpectRebaseOntoConflict is like ExpectRebaseOnto but the rebase
+// returns an error. Production passes nil output here.
+func (m *Mock) ExpectRebaseOntoConflict(newBase, oldBase, head string) {
+	m.expectError("git rebase --onto "+newBase+" "+oldBase+" "+head,
+		errors.New("CONFLICT during rebase --onto"))
+}
+
+// ExpectRebaseAbort queues `git rebase --abort` (no error).
+func (m *Mock) ExpectRebaseAbort() {
+	m.expect("git rebase --abort")
+}
+
 // ExpectDivergenceCheckClean queues the divergence-detection command
 // sequence (one batched fetch + one log -z per commit) and responds
 // with histories that exactly match the local commits — i.e. no
