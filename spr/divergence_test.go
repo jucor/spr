@@ -2,6 +2,7 @@ package spr
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestApplyDivergencePolicy_Drop_ProceedsWithSummary(t *testing.T) {
 			Reason:         git.DivergenceForeignCommits,
 		},
 	}
-	ok := sd.applyDivergencePolicy(divs)
+	ok := sd.applyDivergencePolicy(context.Background(), nil, divs)
 
 	require.True(t, ok, "drop policy must proceed")
 	require.Contains(t, out.String(), "onRemoteDivergence=drop")
@@ -58,7 +59,7 @@ func TestApplyDivergencePolicy_Ask_NonTTY_RefusesWithGuide(t *testing.T) {
 			Reason:         git.DivergenceForeignCommits,
 		},
 	}
-	ok := sd.applyDivergencePolicy(divs)
+	ok := sd.applyDivergencePolicy(context.Background(), nil, divs)
 
 	require.False(t, ok, "non-TTY ask must refuse")
 	s := out.String()
@@ -86,7 +87,7 @@ func TestApplyDivergencePolicy_Ask_WithInjectedPromptDrop(t *testing.T) {
 		LocalCommit: git.Commit{CommitID: "11111111"},
 		Reason:      git.DivergenceForeignCommits,
 	}}
-	ok := sd.applyDivergencePolicy(divs)
+	ok := sd.applyDivergencePolicy(context.Background(), nil, divs)
 
 	require.True(t, ok)
 	require.Len(t, captured, 1)
@@ -98,7 +99,7 @@ func TestApplyDivergencePolicy_Ask_WithInjectedPromptAbort(t *testing.T) {
 	sd.divergencePromptFn = func(d []git.Divergence) DivergenceAction {
 		return DivergenceActionAbort
 	}
-	ok := sd.applyDivergencePolicy([]git.Divergence{{Reason: git.DivergenceForeignCommits}})
+	ok := sd.applyDivergencePolicy(context.Background(), nil, []git.Divergence{{Reason: git.DivergenceForeignCommits}})
 	require.False(t, ok)
 }
 
@@ -111,7 +112,7 @@ func TestApplyDivergencePolicy_EmptyPolicy_DefaultsToAsk(t *testing.T) {
 	sd.divergencePromptFn = func(d []git.Divergence) DivergenceAction {
 		return DivergenceActionAbort
 	}
-	ok := sd.applyDivergencePolicy([]git.Divergence{{Reason: git.DivergenceForeignCommits}})
+	ok := sd.applyDivergencePolicy(context.Background(), nil, []git.Divergence{{Reason: git.DivergenceForeignCommits}})
 	require.False(t, ok, "empty policy treated as ask, and our prompt returned abort")
 }
 
@@ -119,7 +120,7 @@ func TestApplyDivergencePolicy_InvalidPolicy_Refuses(t *testing.T) {
 	sd := stubStackedDiff("nonsense")
 	out := &bytes.Buffer{}
 	sd.output = out
-	ok := sd.applyDivergencePolicy([]git.Divergence{{Reason: git.DivergenceForeignCommits}})
+	ok := sd.applyDivergencePolicy(context.Background(), nil, []git.Divergence{{Reason: git.DivergenceForeignCommits}})
 	require.False(t, ok)
 	require.Contains(t, out.String(), "invalid onRemoteDivergence")
 }

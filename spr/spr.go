@@ -52,6 +52,12 @@ type stackediff struct {
 	// TTY-detecting interactive divergence prompt. Production code leaves
 	// it nil; tests inject a scripted decider.
 	divergencePromptFn func([]git.Divergence) DivergenceAction
+
+	// foldMessageWriter, when non-nil, replaces the default os.CreateTemp
+	// helper used by the merge-policy fold to materialise a commit
+	// message file. Tests inject a function that returns a fixed path so
+	// mockgit assertions stay deterministic.
+	foldMessageWriter func(content string) (path string, cleanup func(), err error)
 }
 
 // AmendCommit enables one to easily amend a commit in the middle of a stack
@@ -310,7 +316,7 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 	// commit that has a corresponding remote head ref. The
 	// `--force-with-lease` flag below is the secondary safety net for
 	// races between detection and push.
-	if !sd.checkRemoteDivergence(ctx, rawLocalCommits) {
+	if !sd.checkRemoteDivergence(ctx, githubInfo, rawLocalCommits) {
 		return
 	}
 	sd.profiletimer.Step("UpdatePullRequests::CheckRemoteDivergence")

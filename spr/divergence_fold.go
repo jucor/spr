@@ -1,11 +1,14 @@
 package spr
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/ejoffe/spr/git"
+	"github.com/ejoffe/spr/github"
 )
 
 // foldDivergences implements the `onRemoteDivergence: merge` policy.
@@ -59,12 +62,14 @@ func (sd *stackediff) foldDivergences(divs []git.Divergence) (folded, refused []
 // before returning the error.
 //
 // Sequence (each step is one git call):
-//  1. capture origHead   (`rev-parse HEAD`)
-//  2. detach at target   (`checkout --detach <target>`)
-//  3. apply each foreign diff   (`cherry-pick --no-commit <sha>`, oldest first)
-//  4. amend target with new tree   (`commit --amend --no-edit`)
-//  5. capture newTarget   (`rev-parse HEAD`)
-//  6. re-stack descendants   (`rebase --onto <newTarget> <target> <origHead>`)
+//  1. capture origHead       (`rev-parse HEAD`)
+//  2. read target message    (`log -1 --format=%B <target>`)
+//  3. detach at target       (`checkout --detach <target>`)
+//  4. apply each foreign diff (`cherry-pick --no-commit <sha>`, oldest-first)
+//  5. amend target with new tree + co-author trailers
+//     (`commit --amend -F <msgfile>`)
+//  6. capture newTarget       (`rev-parse HEAD`)
+//  7. re-stack descendants    (`rebase --onto <newTarget> <target> <origHead>`)
 func (sd *stackediff) foldOneDivergence(d git.Divergence) error {
 	targetHash := d.LocalCommit.CommitHash
 	if targetHash == "" {
@@ -77,9 +82,21 @@ func (sd *stackediff) foldOneDivergence(d git.Divergence) error {
 	}
 	origHead = strings.TrimSpace(origHead)
 
+	// Read target's current message so we can preserve it (with the
+	// commit-id trailer) and append Co-authored-by trailers.
+	var targetMessage string
+	if err := sd.gitcmd.Git("log -1 --format=%B "+targetHash, &targetMessage); err != nil {
+		return fmt.Errorf("log target message: %v", err)
+	}
+
+	newMessage := appendCoauthorTrailers(targetMessage, d.ForeignCommits)
+	msgPath, cleanup, err := sd.writeFoldMessage(newMessage)
+	if err != nil {
+		return fmt.Errorf("write fold message: %v", err)
+	}
+	defer cleanup()
+
 	if err := sd.gitcmd.Git("checkout --detach "+targetHash, nil); err != nil {
-		// Couldn't even detach — nothing to roll back beyond ensuring
-		// HEAD is at origHead, which it already is.
 		return fmt.Errorf("checkout target failed: %v", err)
 	}
 
@@ -94,11 +111,10 @@ func (sd *stackediff) foldOneDivergence(d git.Divergence) error {
 		}
 	}
 
-	// Amend in place: keeps the target's message (and commit-id trailer)
-	// but the tree now includes the foreign diffs we just cherry-picked.
-	// Stack 3/3 will replace --no-edit with a custom message file that
-	// appends Co-authored-by trailers.
-	if err := sd.gitcmd.Git("commit --amend --no-edit", nil); err != nil {
+	// Amend in place with the new message file. The message preserves
+	// the target's body + commit-id trailer and appends one
+	// `Co-authored-by:` line per unique maintainer.
+	if err := sd.gitcmd.Git("commit --amend -F "+msgPath, nil); err != nil {
 		_ = sd.gitcmd.Git("checkout "+origHead, nil)
 		return fmt.Errorf("commit --amend: %v", err)
 	}
@@ -120,6 +136,137 @@ func (sd *stackediff) foldOneDivergence(d git.Divergence) error {
 		return fmt.Errorf("rebase --onto failed: %v", err)
 	}
 	return nil
+}
+
+// appendCoauthorTrailers returns origMessage with one
+// `Co-authored-by: Name <email>` trailer per unique (name, email) pair
+// found in foreigns. Already-present trailers are not re-added. Maintains
+// at least one blank line between the body and the trailer block, since
+// git's trailer parser requires that separation.
+func appendCoauthorTrailers(origMessage string, foreigns []git.RemoteCommit) string {
+	trimmed := strings.TrimRight(origMessage, "\n")
+	seen := make(map[string]bool)
+	// Pre-seed with any trailers already in the message so re-folds don't
+	// duplicate them.
+	for _, line := range strings.Split(trimmed, "\n") {
+		if strings.HasPrefix(strings.ToLower(line), "co-authored-by:") {
+			seen[strings.TrimSpace(line)] = true
+		}
+	}
+	var trailers []string
+	for _, fc := range foreigns {
+		if fc.Author == "" {
+			continue
+		}
+		email := fc.AuthorEmail
+		if email == "" {
+			email = "noreply@example.com"
+		}
+		trailer := fmt.Sprintf("Co-authored-by: %s <%s>", fc.Author, email)
+		if seen[trailer] {
+			continue
+		}
+		seen[trailer] = true
+		trailers = append(trailers, trailer)
+	}
+	if len(trailers) == 0 {
+		return trimmed + "\n"
+	}
+	// If the message ends with a trailer block (no blank line before),
+	// append directly. If it ends with prose (no trailing trailer line),
+	// insert one blank line.
+	if !endsWithTrailerBlock(trimmed) {
+		trimmed += "\n"
+	}
+	return trimmed + "\n" + strings.Join(trailers, "\n") + "\n"
+}
+
+// endsWithTrailerBlock reports whether the last non-blank line of msg
+// looks like a git trailer (Token: value). Used to decide whether to
+// insert a blank-line separator before appending new trailers.
+func endsWithTrailerBlock(msg string) bool {
+	lines := strings.Split(msg, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		// A trailer line is one with a "Token: value" shape and no spaces
+		// in the token. spr's own `commit-id:` lines match this.
+		colonIdx := strings.Index(line, ":")
+		if colonIdx <= 0 {
+			return false
+		}
+		token := line[:colonIdx]
+		if strings.ContainsAny(token, " \t") {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// writeFoldMessage materialises the given content as a file that
+// `git commit --amend -F` can read. Production uses os.CreateTemp; tests
+// inject sd.foldMessageWriter to return a fixed path so mock expectations
+// stay deterministic.
+func (sd *stackediff) writeFoldMessage(content string) (string, func(), error) {
+	if sd.foldMessageWriter != nil {
+		return sd.foldMessageWriter(content)
+	}
+	f, err := os.CreateTemp("", "spr-fold-msg-*.txt")
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", nil, err
+	}
+	f.Close()
+	cleanup := func() { os.Remove(f.Name()) }
+	return f.Name(), cleanup, nil
+}
+
+// postFoldComments posts one PR comment per folded divergence, telling
+// the maintainer their commits were absorbed into the underlying local
+// commit and warning against `git push --force` on the head branch.
+// Skipped silently when info is nil or no matching PR is found.
+func (sd *stackediff) postFoldComments(ctx context.Context, info *github.GitHubInfo, folded []git.Divergence) {
+	if info == nil {
+		return
+	}
+	for _, d := range folded {
+		pr := findPRByCommitID(info.PullRequests, d.LocalCommit.CommitID)
+		if pr == nil {
+			continue
+		}
+		sd.github.CommentPullRequest(ctx, pr, buildFoldComment(d))
+	}
+}
+
+func findPRByCommitID(prs []*github.PullRequest, cid string) *github.PullRequest {
+	for _, pr := range prs {
+		if pr.Commit.CommitID == cid {
+			return pr
+		}
+	}
+	return nil
+}
+
+func buildFoldComment(d git.Divergence) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "spr integrated %d commit(s) from this branch into the underlying local commit "+
+		"(commit-id `%s`):\n\n", len(d.ForeignCommits), d.LocalCommit.CommitID)
+	for _, fc := range d.ForeignCommits {
+		fmt.Fprintf(&b, "- `%s` %s — %s\n", shortSHA(fc.SHA), fc.Subject, fc.Author)
+	}
+	fmt.Fprintf(&b, "\nThe head branch was force-pushed to reflect this. If you have local "+
+		"changes on top, please:\n\n")
+	fmt.Fprintf(&b, "```bash\ngit fetch && git reset --hard origin/%s\n```\n\n", d.HeadBranch)
+	fmt.Fprintf(&b, "Do **not** `git push --force` — it would undo the integration and "+
+		"the contributor's next `spr update` would absorb your work again.\n")
+	return b.String()
 }
 
 // printFoldSummary prints one line per PR explaining what happened.

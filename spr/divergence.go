@@ -10,6 +10,7 @@ import (
 
 	"github.com/ejoffe/spr/config"
 	"github.com/ejoffe/spr/git"
+	"github.com/ejoffe/spr/github"
 	"golang.org/x/term"
 )
 
@@ -32,8 +33,12 @@ const (
 //
 // Returns true to proceed, false to abort. Any user-facing message has
 // already been printed. localCommits is the already-fetched local stack
-// (avoids a redundant `git log` call vs. re-fetching here).
-func (sd *stackediff) checkRemoteDivergence(ctx context.Context, localCommits []git.Commit) bool {
+// (avoids a redundant `git log` call vs. re-fetching here). info is
+// optional: when non-nil, the merge policy uses its PullRequests to post
+// per-fold comments via GitHub.
+func (sd *stackediff) checkRemoteDivergence(ctx context.Context,
+	info *github.GitHubInfo, localCommits []git.Commit) bool {
+
 	if len(localCommits) == 0 {
 		return true
 	}
@@ -62,13 +67,16 @@ func (sd *stackediff) checkRemoteDivergence(ctx context.Context, localCommits []
 	if len(divergences) == 0 {
 		return true
 	}
-	return sd.applyDivergencePolicy(divergences)
+	return sd.applyDivergencePolicy(ctx, info, divergences)
 }
 
 // applyDivergencePolicy routes a non-empty Divergence list through the
 // configured policy. Exposed as a method (not a free function) so tests
-// can inject sd.divergencePromptFn.
-func (sd *stackediff) applyDivergencePolicy(divergences []git.Divergence) bool {
+// can inject sd.divergencePromptFn. info is optional and used only by
+// the merge policy to post per-fold PR comments.
+func (sd *stackediff) applyDivergencePolicy(ctx context.Context,
+	info *github.GitHubInfo, divergences []git.Divergence) bool {
+
 	policy := sd.config.Repo.OnRemoteDivergence
 	if policy == "" {
 		policy = config.OnRemoteDivergenceAsk
@@ -88,6 +96,7 @@ func (sd *stackediff) applyDivergencePolicy(divergences []git.Divergence) bool {
 				"\nRefusing to continue: resolve the unfoldable PR(s) above manually, then re-run.\n")
 			return false
 		}
+		sd.postFoldComments(ctx, info, folded)
 		return true
 
 	case config.OnRemoteDivergenceAsk:

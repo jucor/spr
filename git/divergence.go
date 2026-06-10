@@ -20,15 +20,18 @@ type RemoteHead struct {
 	History []RemoteCommit
 }
 
-// RemoteCommit is one commit on the walk back from a remote head, with the
-// minimum metadata needed by detection. CommitID is the value of the
-// `commit-id:` trailer if present in the body, "" otherwise.
+// RemoteCommit is one commit on the walk back from a remote head, with
+// the minimum metadata needed by detection and the fold step. CommitID
+// is the value of the `commit-id:` trailer if present in the body, ""
+// otherwise. AuthorEmail is populated alongside Author so the fold step
+// can build proper `Co-authored-by: Name <email>` trailers.
 type RemoteCommit struct {
-	SHA      string
-	Subject  string
-	Author   string
-	Body     string
-	CommitID string
+	SHA         string
+	Subject     string
+	Author      string
+	AuthorEmail string
+	Body        string
+	CommitID    string
 }
 
 // DivergenceReason categorises why a PR head differs from the local commit.
@@ -218,10 +221,10 @@ func ReadRemoteHeads(gitcmd GitInterface, remote string, branches []string,
 
 // logSeparator is what we put in the git log --format= string. We rely on
 // `git log -z` to separate commits with NUL bytes; within each commit, %n
-// (newline) separates the SHA, author, subject, and body fields. The body
-// (which can contain embedded newlines) is always last so a SplitN(...,4)
-// captures it as the final chunk.
-const remoteLogFormat = "%H%n%an%n%s%n%b"
+// (newline) separates the SHA, author name, author email, subject, and
+// body fields. The body (which can contain embedded newlines) is always
+// last so a SplitN(...,5) captures it as the final chunk.
+const remoteLogFormat = "%H%n%an%n%ae%n%s%n%b"
 
 func readSingleHead(gitcmd GitInterface, branch, ref string, maxWalkDepth int) (RemoteHead, bool) {
 	var output string
@@ -242,8 +245,9 @@ func readSingleHead(gitcmd GitInterface, branch, ref string, maxWalkDepth int) (
 }
 
 // parseRemoteLog decodes the output of `git log -z --format=remoteLogFormat`.
-// Each commit chunk is NUL-terminated; within a chunk, four fields are
-// newline-separated: SHA, author, subject, body. Body may contain newlines.
+// Each commit chunk is NUL-terminated; within a chunk, five fields are
+// newline-separated: SHA, author name, author email, subject, body. Body
+// may contain newlines.
 func parseRemoteLog(s string) []RemoteCommit {
 	if s == "" {
 		return nil
@@ -254,17 +258,18 @@ func parseRemoteLog(s string) []RemoteCommit {
 		if entry == "" {
 			continue
 		}
-		parts := strings.SplitN(entry, "\n", 4)
-		for len(parts) < 4 {
+		parts := strings.SplitN(entry, "\n", 5)
+		for len(parts) < 5 {
 			parts = append(parts, "")
 		}
-		body := strings.TrimRight(parts[3], "\n")
+		body := strings.TrimRight(parts[4], "\n")
 		out = append(out, RemoteCommit{
-			SHA:      parts[0],
-			Author:   parts[1],
-			Subject:  parts[2],
-			Body:     body,
-			CommitID: ExtractCommitIDTrailer(body),
+			SHA:         parts[0],
+			Author:      parts[1],
+			AuthorEmail: parts[2],
+			Subject:     parts[3],
+			Body:        body,
+			CommitID:    ExtractCommitIDTrailer(body),
 		})
 	}
 	return out

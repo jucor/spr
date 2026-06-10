@@ -172,7 +172,7 @@ func (m *Mock) ExpectFetchHeadRefs(remote string, branches []string) {
 // would receive).
 func remoteHeadLogLiteralCmd(remote, branch string, depth int) string {
 	ref := "refs/remotes/" + remote + "/" + branch
-	return fmt.Sprintf("git log -z --no-color --format=%%H%%n%%an%%n%%s%%n%%b -n %d %s", depth, ref)
+	return fmt.Sprintf("git log -z --no-color --format=%%H%%n%%an%%n%%ae%%n%%s%%n%%b -n %d %s", depth, ref)
 }
 
 // ExpectRemoteHeadLog queues an expectation for the `git log -z` call used
@@ -181,7 +181,7 @@ func remoteHeadLogLiteralCmd(remote, branch string, depth int) string {
 func (m *Mock) ExpectRemoteHeadLog(remote, branch string, depth int, commits []RemoteCommitFixture) {
 	var parts []string
 	for _, c := range commits {
-		parts = append(parts, c.SHA+"\n"+c.Author+"\n"+c.Subject+"\n"+c.Body)
+		parts = append(parts, c.SHA+"\n"+c.Author+"\n"+c.AuthorEmail+"\n"+c.Subject+"\n"+c.Body)
 	}
 	// expect() re-Sprintfs the cmd, so escape % → %%.
 	escaped := strings.ReplaceAll(remoteHeadLogLiteralCmd(remote, branch, depth), "%", "%%")
@@ -201,10 +201,11 @@ func (m *Mock) ExpectRemoteHeadLogMissing(remote, branch string, depth int) {
 // RemoteCommitFixture carries the minimum data needed to synthesise one
 // commit entry in the `git log -z` output for a remote head walk.
 type RemoteCommitFixture struct {
-	SHA     string
-	Author  string
-	Subject string
-	Body    string
+	SHA         string
+	Author      string
+	AuthorEmail string
+	Subject     string
+	Body        string
 }
 
 // ExpectRevParseHead queues an expectation for `git rev-parse HEAD` and
@@ -254,6 +255,19 @@ func (m *Mock) ExpectCommitAmendNoEdit() {
 	m.expect("git commit --amend --no-edit")
 }
 
+// ExpectCommitAmendWithMessage queues `git commit --amend -F <path>` —
+// the form used by the merge-policy fold to apply a custom message
+// (target's original + Co-authored-by trailers).
+func (m *Mock) ExpectCommitAmendWithMessage(path string) {
+	m.expect("git commit --amend -F " + path)
+}
+
+// ExpectLogTargetMessage queues `git log -1 --format=%B <sha>` and
+// responds with the given message (no trailing newline added).
+func (m *Mock) ExpectLogTargetMessage(sha, message string) {
+	m.expect("git log -1 --format=%%B " + sha).respond(message)
+}
+
 // ExpectRebaseOnto queues `git rebase --onto <newBase> <oldBase> <head>`.
 func (m *Mock) ExpectRebaseOnto(newBase, oldBase, head string) {
 	m.expect("git rebase --onto " + newBase + " " + oldBase + " " + head)
@@ -301,9 +315,11 @@ func (m *Mock) ExpectDivergenceCheckClean(commits []*git.Commit) {
 		m.ExpectRemoteHeadLog("origin", "spr/master/"+c.CommitID, 20,
 			[]RemoteCommitFixture{
 				{
-					SHA:     c.CommitHash,
-					Subject: c.Subject,
-					Body:    "commit-id: " + c.CommitID,
+					SHA:         c.CommitHash,
+					Author:      "Local Author",
+					AuthorEmail: "local@example.com",
+					Subject:     c.Subject,
+					Body:        "commit-id: " + c.CommitID,
 				},
 			})
 	}
