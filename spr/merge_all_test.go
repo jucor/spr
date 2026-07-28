@@ -384,6 +384,112 @@ func TestMergeAllBottomUpMergeQueue(t *testing.T) {
 	})
 }
 
+// TestMergeAllBottomUpMergeQueueDeletesBranchesAfterWait mirrors
+// TestMergeAllBottomUpMergeQueue but with DeleteMergedBranches enabled: the
+// branch delete for a landed PR must fire only AFTER waitUntilMerged has
+// confirmed the queue actually merged it, never before (deleting the
+// branch of a PR that's merely enqueued, not yet merged, would be
+// premature and could race the queue).
+func TestMergeAllBottomUpMergeQueueDeletesBranchesAfterWait(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		s.config.Repo.SquashGranularity = "perPR"
+		s.config.Repo.MergeQueue = true
+		s.config.User.DeleteMergedBranches = true
+		assert := require.New(t)
+		ctx := context.Background()
+		s.sleep = func(d time.Duration) {}
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+
+		infoAfterC1 := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+			// c1 landed: only c2's PR remains open, no conflicts (disjoint stack)
+			PullRequests: []*github.PullRequest{githubmock.Info.PullRequests[1]},
+		}
+		infoEmpty := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+		}
+		githubmock.InfoQueue = []*github.GitHubInfo{
+			githubmock.Info, // iteration 1
+			githubmock.Info, // waitUntilMerged(c1) poll 1: c1 still open
+			infoAfterC1,     // waitUntilMerged(c1) poll 2: c1 gone -> merged
+			infoAfterC1,     // iteration 2
+			infoEmpty,       // waitUntilMerged(c2) poll 1: c2 gone -> merged
+			infoEmpty,       // iteration 3: empty -> loop ends
+		}
+
+		githubmock.ExpectGetInfo()                                                                                 // iteration 1
+		githubmock.ExpectUpdatePullRequest(c2, nil)                                                                // retarget next BEFORE merging bottom
+		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1") // queue path: enqueue
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged(c1) poll 1
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged(c1) poll 2 - confirms merged
+		gitmock.ExpectDeleteBranch("from_branch")                                                                 // delete happens AFTER the wait confirms c1 merged
+		githubmock.ExpectGetInfo()                                                                                 // iteration 2
+		githubmock.ExpectMergePullRequestWithMessage(c2, genclient.PullRequestMergeMethod_SQUASH, "test commit 2") // queue path: enqueue
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged(c2) poll 1 - confirms merged
+		gitmock.ExpectDeleteBranch("from_branch")                                                                 // delete happens AFTER the wait confirms c2 merged
+		githubmock.ExpectGetInfo()                                                                                 // iteration 3: empty -> loop ends
+		s.MergePullRequests(ctx, nil)
+		lines := strings.Split(output.String(), "\n")
+		assert.Contains(lines[0], "waiting for the merge queue to merge PR #1")
+		assert.Equal("MERGED   1 : test commit 1", lines[1])
+		assert.Equal("MERGED   1 : test commit 2", lines[2])
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
+
+// TestMergeAllBottomUpMergeQueueTimeout mirrors TestMergeAllCascadeWaitTimeout
+// for the bottom-up + mergeQueue combination: the queue never actually
+// lands the bottom PR (InfoQueue keeps serving it as still open), so
+// waitUntilMerged must eventually time out instead of polling forever.
+func TestMergeAllBottomUpMergeQueueTimeout(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		t.Setenv("SPR_DEBUG", "1") // check() panics instead of os.Exit
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		s.config.Repo.SquashGranularity = "perPR"
+		s.config.Repo.MergeQueue = true
+		s.config.Repo.MergeWaitTimeout = "5s" // one 5s sleep exhausts it
+		assert := require.New(t)
+		ctx := context.Background()
+		s.sleep = func(d time.Duration) {}
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+
+		// the bottom PR (c1) never disappears from the open PRs - the queue
+		// never actually lands it.
+		githubmock.InfoQueue = []*github.GitHubInfo{
+			githubmock.Info, // iteration 1
+			githubmock.Info, // waitUntilMerged poll 1: still open
+			githubmock.Info, // waitUntilMerged poll 2: still open -> timeout
+		}
+		githubmock.ExpectGetInfo()                                                                                 // iteration 1
+		githubmock.ExpectUpdatePullRequest(c2, nil)                                                                // retarget next BEFORE merging bottom
+		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1") // queue path: enqueue
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged poll 1
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged poll 2
+		defer func() {
+			r := recover()
+			assert.NotNil(r, "expected timeout panic under SPR_DEBUG")
+			assert.Contains(fmt.Sprint(r), "timed out waiting for the merge queue")
+		}()
+		s.MergePullRequests(ctx, nil)
+	})
+}
+
 func TestMergeAllCascadeWaitTimeout(t *testing.T) {
 	t.Run("Sync: true", func(t *testing.T) {
 		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
@@ -602,6 +708,57 @@ func TestMergeAllCascadeNoMergeableResumeClearsStaleFlag(t *testing.T) {
 		assert.False(s.config.State.MergeAllInProgress[key])
 		assert.Equal(1, stateSaves, "the flag was repaired before the fatal check() panic")
 		assert.Contains(output.String(), "cleared stale mergeAll-in-progress flag")
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
+
+// TestMergeAllCascadeMidResumeKeepsFlagWhenNotYetMergeable covers the
+// CRITICAL fix: topMergeableIndex returning -1 while PRs are still open
+// (none mergeable yet) must NOT be treated as automatically stale just
+// because the persisted flag is set. This is the primary resume scenario
+// the guard protects: a previous mergeAll cascade already landed its
+// internal merges and the final wait timed out (the flag was deliberately
+// left set), and the user re-ran while the bottom PR's checks are still
+// pending. Clearing the flag here would let a subsequent 'spr update'
+// force-push and duplicate PRs, so the flag must stay set and the panic
+// message must point at the actual blocker instead of the generic
+// "nothing mergeable" fatal.
+func TestMergeAllCascadeMidResumeKeepsFlagWhenNotYetMergeable(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		t.Setenv("SPR_DEBUG", "1")
+		s.config.Repo.StackMergeMode = "mergeAll"
+		assert := require.New(t)
+		ctx := context.Background()
+		var stateSaves int
+		s.saveState = func() { stateSaves++ }
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+		key := githubmock.Info.Key()
+		output.Reset()
+
+		// simulate a resumed run mid-cascade: flag stuck true (a previous
+		// cascade's internal merges already landed and the final wait timed
+		// out, leaving the flag deliberately set), and both remaining PRs
+		// are still pending checks - none mergeable yet.
+		s.config.State.MergeAllInProgress[key] = true
+		bothPending := pendingBottomInfo(githubmock.Info)
+		bothPending.PullRequests[1].MergeStatus.ChecksPass = github.CheckStatusPending
+		githubmock.InfoQueue = []*github.GitHubInfo{bothPending}
+		githubmock.ExpectGetInfo()
+		func() {
+			defer func() {
+				r := recover()
+				assert.NotNil(r, "expected the not-yet-mergeable panic under SPR_DEBUG")
+				assert.Contains(fmt.Sprint(r), "not yet mergeable")
+			}()
+			s.MergePullRequests(ctx, nil)
+		}()
+		assert.True(s.config.State.MergeAllInProgress[key], "flag must stay set - the cascade is still mid-resume")
+		assert.Equal(0, stateSaves, "no state write on this path - the flag was already correct")
 		gitmock.ExpectationsMet()
 		githubmock.ExpectationsMet()
 	})

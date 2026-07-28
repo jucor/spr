@@ -457,6 +457,11 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 //	pull request. This one merge in effect merges all the commits in the stack.
 //	We than close all the pull requests which are below the merged request, as
 //	their commits have already been merged.
+//
+// This is the default "tip" behavior (config stackMergeMode: tip). When
+// stackMergeMode is set to mergeAll (or --merge-all is passed), every PR in
+// the stack is landed as MERGED instead, via a different dispatch — see
+// spr/merge_all.go for that codepath.
 func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
 	sd.profiletimer.Step("MergePullRequests::Start")
 

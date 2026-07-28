@@ -192,7 +192,7 @@ For `mergeMethod: rebase` or `merge`, PRs land tip-down: each PR merges into the
 - `perStack` (default): the whole stack still collapses into one squash commit on the target branch, same tip-down landing as above -- at most one CI wait.
 - `perPR`: one squash commit per PR, landing bottom-up. Squashing erases commit ancestry, so whenever a landed PR's changes overlap a PR still open above it, spr restacks (rebase + force-push, the same flow as `git spr update`) and waits for CI again -- a full stack can incur one restack-and-wait per overlapping level.
 
-`mergeWaitTimeout` (default `10m`) bounds how long `git spr merge` polls for a PR to become mergeable/merged before giving up. On timeout it exits with an error; re-running `git spr merge` resumes the merge where it left off -- PRs already MERGED are skipped.
+`mergeWaitTimeout` (default `10m`) bounds how long `git spr merge` polls for a PR to become mergeable/merged before giving up. On timeout it exits with an error; re-running `git spr merge` resumes the merge where it left off -- PRs already MERGED are skipped -- once the pending checks are green.
 
 ### Merge status bits
 

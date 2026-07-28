@@ -39,6 +39,8 @@ func (c *MockClient) GetInfo(ctx context.Context, gitcmd git.GitInterface) *gith
 	c.verifyExpectation(expectation{
 		op: getInfoOP,
 	})
+	c.expectMutex.Lock()
+	defer c.expectMutex.Unlock()
 	if len(c.InfoQueue) > 0 {
 		next := c.InfoQueue[0]
 		c.InfoQueue = c.InfoQueue[1:]

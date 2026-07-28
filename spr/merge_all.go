@@ -28,14 +28,35 @@ func (sd *stackediff) mergeAll(ctx context.Context, count *uint) {
 	sd.runMergeCheckGate(githubInfo)
 	prIndex := topMergeableIndex(sd.config, githubInfo.PullRequests, count)
 	if prIndex == -1 {
-		// Nothing mergeable this run: if the persisted flag is set, it must
-		// be stale (left over from an earlier crashed run — this call never
-		// set it itself, since marking happens further below). Repair it
-		// even on this fatal-exit path, so the guard's own "re-run 'git spr
-		// merge'" recovery hint is actually true on the next attempt.
+		if len(githubInfo.PullRequests) == 0 {
+			// Nothing mergeable because there's nothing open: if the
+			// persisted flag is set, it must be stale (left over from an
+			// earlier crashed run — this call never set it itself, since
+			// marking happens further below). Repair it even on this
+			// fatal-exit path, so the guard's own "re-run 'git spr merge'"
+			// recovery hint is actually true on the next attempt.
+			if sd.config.State.MergeAllInProgress[githubInfo.Key()] {
+				fmt.Fprintf(sd.output, "note: cleared stale mergeAll-in-progress flag for this stack\n")
+				sd.clearMergeAllInProgress(githubInfo.Key())
+			}
+			check(errors.New("no mergeable pull requests found in the stack"))
+			return
+		}
 		if sd.config.State.MergeAllInProgress[githubInfo.Key()] {
-			fmt.Fprintf(sd.output, "note: cleared stale mergeAll-in-progress flag for this stack\n")
-			sd.clearMergeAllInProgress(githubInfo.Key())
+			// PRs are still open, but none is mergeable yet, and the
+			// persisted flag is set for this stack — this is the primary
+			// resume scenario the guard protects: a previous mergeAll
+			// cascade already landed its internal merges and the final
+			// wait timed out (the flag was deliberately left set), and the
+			// user re-ran while the bottom PR's checks are still pending
+			// or failing. Keep the flag set (clearing it here would let a
+			// subsequent 'spr update' force-push and duplicate PRs) and
+			// point at the actual blocker instead of a misleading
+			// "nothing mergeable" fatal.
+			check(fmt.Errorf(
+				"a mergeAll stack merge in progress: PR #%d is not yet mergeable (checks pending or failing) — re-run 'git spr merge' once checks are green",
+				githubInfo.PullRequests[0].Number))
+			return
 		}
 		check(errors.New("no mergeable pull requests found in the stack"))
 		return
@@ -97,7 +118,14 @@ func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
 			continue
 		}
 		if !bottom.Mergeable(sd.config) {
-			bottom = sd.waitUntilMergeable(ctx, bottom.Commit.CommitID)
+			// waitUntilMergeable can take minutes; the stack may have
+			// changed underneath us (a landing above, a new commit
+			// pushed, a restack). `info`/`open` are now stale, so don't
+			// keep using them below — loop back and let the next
+			// iteration's GetInfo re-fetch a fresh view before retargeting
+			// or merging anything.
+			sd.waitUntilMergeable(ctx, bottom.Commit.CommitID)
+			continue
 		}
 		if len(open) > 1 {
 			next := open[1]
