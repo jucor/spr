@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ejoffe/spr/github/githubclient/gen/genclient"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +31,10 @@ func TestDefaultConfig(t *testing.T) {
 			RequireChecks:         true,
 			RequireApproval:       true,
 			MergeMethod:           "rebase",
+			MergeQueue:            false,
+			StackMergeMode:        "tip",
+			SquashGranularity:     "perStack",
+			MergeWaitTimeout:      "10m",
 			PRTemplateType:        "stack",
 			PRTemplatePath:        "",
 			PRTemplateInsertStart: "",
@@ -136,4 +141,35 @@ func TestNormalizeConfig(t *testing.T) {
 		cfg.Normalize()
 		assert.Equal(t, "custom", cfg.Repo.PRTemplateType)
 	})
+}
+
+func TestMergeAllEnabled(t *testing.T) {
+	cfg := EmptyConfig()
+	assert.False(t, cfg.MergeAllEnabled(), "zero value must mean tip mode")
+	cfg.Repo.StackMergeMode = "tip"
+	assert.False(t, cfg.MergeAllEnabled())
+	cfg.Repo.StackMergeMode = "mergeAll"
+	assert.True(t, cfg.MergeAllEnabled())
+	cfg.Repo.StackMergeMode = "MERGEALL" // case-insensitive
+	assert.True(t, cfg.MergeAllEnabled())
+}
+
+func TestSquashPerPR(t *testing.T) {
+	cfg := EmptyConfig()
+	assert.False(t, cfg.SquashPerPR(), "zero value must mean perStack")
+	cfg.Repo.SquashGranularity = "perStack"
+	assert.False(t, cfg.SquashPerPR())
+	cfg.Repo.SquashGranularity = "perPR"
+	assert.True(t, cfg.SquashPerPR())
+}
+
+func TestMergeWaitTimeoutDuration(t *testing.T) {
+	cfg := EmptyConfig()
+	assert.Equal(t, 10*time.Minute, cfg.MergeWaitTimeoutDuration(), "zero value falls back to 10m")
+	cfg.Repo.MergeWaitTimeout = "90s"
+	assert.Equal(t, 90*time.Second, cfg.MergeWaitTimeoutDuration())
+	cfg.Repo.MergeWaitTimeout = "garbage"
+	assert.Equal(t, 10*time.Minute, cfg.MergeWaitTimeoutDuration())
+	cfg.Repo.MergeWaitTimeout = "-5m"
+	assert.Equal(t, 10*time.Minute, cfg.MergeWaitTimeoutDuration())
 }

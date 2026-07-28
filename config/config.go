@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ejoffe/rake"
 	"github.com/ejoffe/spr/github/githubclient/gen/genclient"
@@ -30,6 +31,10 @@ type RepoConfig struct {
 
 	MergeMethod string `default:"rebase" yaml:"mergeMethod"`
 	MergeQueue  bool   `default:"false" yaml:"mergeQueue"`
+
+	StackMergeMode    string `default:"tip" yaml:"stackMergeMode"`
+	SquashGranularity string `default:"perStack" yaml:"squashGranularity"`
+	MergeWaitTimeout  string `default:"10m" yaml:"mergeWaitTimeout"`
 
 	PRTemplateType        string `default:"stack" yaml:"prTemplateType"`
 	PRTemplatePath        string `yaml:"prTemplatePath,omitempty"`
@@ -121,4 +126,28 @@ func (c Config) MergeMethod() (genclient.PullRequestMergeMethod, error) {
 		)
 	}
 	return mergeMethod, err
+}
+
+// MergeAllEnabled reports whether stackMergeMode selects the mergeAll
+// behavior (every PR in the stack ends MERGED) instead of the default
+// tip behavior (merge top PR, close the rest).
+func (c Config) MergeAllEnabled() bool {
+	return strings.EqualFold(c.Repo.StackMergeMode, "mergeAll")
+}
+
+// SquashPerPR reports whether mergeAll+squash should land one squash
+// commit per PR (bottom-up with restacks) instead of one per stack
+// (tip-down cascade).
+func (c Config) SquashPerPR() bool {
+	return strings.EqualFold(c.Repo.SquashGranularity, "perPR")
+}
+
+// MergeWaitTimeoutDuration parses mergeWaitTimeout, falling back to 10m
+// on empty, invalid, or non-positive values.
+func (c Config) MergeWaitTimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(c.Repo.MergeWaitTimeout)
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
 }
