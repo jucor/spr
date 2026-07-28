@@ -106,3 +106,33 @@ func testMergeAllCascadeCountWithSurvivor(t *testing.T, sync bool) {
 		githubmock.ExpectationsMet()
 	})
 }
+
+func TestMergeAllCascadeSquashMessages(t *testing.T) {
+	testMergeAllCascadeSquashMessages(t, true)
+	testMergeAllCascadeSquashMessages(t, false)
+}
+
+func testMergeAllCascadeSquashMessages(t *testing.T, sync bool) {
+	t.Run(fmt.Sprintf("Sync: %v", sync), func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, sync)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		require.False(t, s.config.SquashPerPR(), "default granularity is perStack")
+		ctx := context.Background()
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		c3 := git.Commit{CommitID: "00000003", CommitHash: "c300000000000000000000000000000000000000", Subject: "test commit 3"}
+		populateThreePRs(t, s, gitmock, githubmock, output, c1, c2, c3)
+
+		githubmock.ExpectGetInfo()
+		githubmock.ExpectCommentPullRequest(c3)
+		githubmock.ExpectMergePullRequestWithMessage(c3, genclient.PullRequestMergeMethod_SQUASH, "test commit 3")
+		githubmock.ExpectCommentPullRequest(c2)
+		githubmock.ExpectMergePullRequestWithMessage(c2, genclient.PullRequestMergeMethod_SQUASH, "test commit 2")
+		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1")
+		s.MergePullRequests(ctx, nil)
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
