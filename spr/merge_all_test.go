@@ -174,6 +174,20 @@ func pendingBottomInfo(src *github.GitHubInfo) *github.GitHubInfo {
 	return &clone
 }
 
+// conflictedBottomInfo returns a GitHubInfo whose PRs mirror src but with the
+// bottom PR now flagged as conflicting (same clone technique as
+// pendingBottomInfo).
+func conflictedBottomInfo(src *github.GitHubInfo) *github.GitHubInfo {
+	clone := *src
+	clone.PullRequests = make([]*github.PullRequest, len(src.PullRequests))
+	for i, pr := range src.PullRequests {
+		prCopy := *pr
+		clone.PullRequests[i] = &prCopy
+	}
+	clone.PullRequests[0].MergeStatus.NoConflicts = false
+	return &clone
+}
+
 func TestMergeAllCascadeWaitsForFinalChecks(t *testing.T) {
 	// Synchronized only: the wait loop's GetInfo sequence must be ordered.
 	t.Run("Sync: true", func(t *testing.T) {
@@ -281,5 +295,65 @@ func TestMergeAllCascadeWaitTimeout(t *testing.T) {
 			assert.Contains(fmt.Sprint(r), "timed out")
 		}()
 		s.MergePullRequests(ctx, nil)
+	})
+}
+
+func TestMergeAllBottomUpRestackOnConflict(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		s.config.Repo.SquashGranularity = "perPR"
+		assert := require.New(t)
+		ctx := context.Background()
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		// c2Rebased models the same commit (same commit-id trailer) after the
+		// restack's rebase rewrote it onto the new base: the hash changes even
+		// though content/subject didn't, which is what makes syncCommitStackToGitHub
+		// treat it as updated and push it again.
+		c2Rebased := git.Commit{CommitID: "00000002", CommitHash: "c2b0000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+
+		onlyC2 := &github.GitHubInfo{UserName: githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID, LocalBranch: githubmock.Info.LocalBranch,
+			PullRequests: []*github.PullRequest{githubmock.Info.PullRequests[1]}}
+		conflicted := conflictedBottomInfo(onlyC2)
+		infoEmpty := &github.GitHubInfo{UserName: githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID, LocalBranch: githubmock.Info.LocalBranch}
+		githubmock.InfoQueue = []*github.GitHubInfo{
+			githubmock.Info, // iter 1: both open
+			conflicted,      // iter 2: c2 conflicted -> restack
+			onlyC2,          // restack's own GetInfo (fetchAndGetGitHubInfo)
+			onlyC2,          // restack's trailing StatusPullRequests GetInfo
+			onlyC2,          // iter 3: c2 clean -> land it
+			infoEmpty,       // iter 4: done
+		}
+
+		githubmock.ExpectGetInfo() // iter 1
+		githubmock.ExpectUpdatePullRequest(c2, nil)
+		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1")
+		githubmock.ExpectGetInfo() // iter 2: conflicted
+		// restack = UpdatePullRequests: GetInfo, fetch+rebase (drops c1), push, update, status GetInfo
+		githubmock.ExpectGetInfo()
+		gitmock.ExpectFetch()
+		gitmock.ExpectLogAndRespond([]*git.Commit{&c2Rebased})
+		gitmock.ExpectPushCommits([]*git.Commit{&c2Rebased})
+		githubmock.ExpectUpdatePullRequest(c2Rebased, nil)
+		githubmock.ExpectGetInfo()
+		githubmock.ExpectGetInfo() // iter 3
+		githubmock.ExpectMergePullRequestWithMessage(c2Rebased, genclient.PullRequestMergeMethod_SQUASH, "test commit 2")
+		githubmock.ExpectGetInfo() // iter 4
+		s.MergePullRequests(ctx, nil)
+		lines := strings.Split(strings.TrimRight(output.String(), "\n"), "\n")
+		assert.Equal("MERGED   1 : test commit 1", lines[0])
+		// restack (the full UpdatePullRequests flow) ends with StatusPullRequests,
+		// which prints c2's pre-landing status line into the same output buffer
+		// before c2 itself lands below.
+		assert.Equal("[vvvv]   1 : test commit 2", lines[1])
+		assert.Equal("MERGED   1 : test commit 2", lines[2])
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
 	})
 }
