@@ -28,6 +28,7 @@ func NewMockClient(t *testing.T) *MockClient {
 type MockClient struct {
 	assert       *require.Assertions
 	Info         *github.GitHubInfo
+	InfoQueue    []*github.GitHubInfo // when non-empty, GetInfo pops from here instead of returning Info
 	expect       []expectation
 	expectMutex  sync.Mutex
 	Synchronized bool // When true code is executed without goroutines. Allows test to be deterministic
@@ -38,6 +39,11 @@ func (c *MockClient) GetInfo(ctx context.Context, gitcmd git.GitInterface) *gith
 	c.verifyExpectation(expectation{
 		op: getInfoOP,
 	})
+	if len(c.InfoQueue) > 0 {
+		next := c.InfoQueue[0]
+		c.InfoQueue = c.InfoQueue[1:]
+		return next
+	}
 	return c.Info
 }
 

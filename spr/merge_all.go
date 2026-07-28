@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ejoffe/spr/git"
 	"github.com/ejoffe/spr/github"
@@ -57,7 +58,14 @@ func (sd *stackediff) cascadeMerge(ctx context.Context, githubInfo *github.GitHu
 		}
 	}
 
-	sd.github.MergePullRequest(ctx, prs[0], mergeMethod, cascadeFinalMessage(mergeMethod, prs[:prIndex+1]))
+	finalPR := prs[0]
+	if prIndex >= 1 {
+		// The internal merges above just changed br_0's head SHA; under
+		// branch protection its checks must re-run before this final,
+		// protected landing.
+		finalPR = sd.waitUntilMergeable(ctx, prs[0].Commit.CommitID)
+	}
+	sd.github.MergePullRequest(ctx, finalPR, mergeMethod, cascadeFinalMessage(mergeMethod, prs[:prIndex+1]))
 	if sd.config.User.DeleteMergedBranches {
 		sd.deleteRemoteBranchBestEffort(ctx, prs[0].FromBranch)
 	}
@@ -65,6 +73,43 @@ func (sd *stackediff) cascadeMerge(ctx context.Context, githubInfo *github.GitHu
 	for i := 0; i <= prIndex; i++ {
 		prs[i].Merged = true
 		fmt.Fprintf(sd.output, "%s\n", prs[i].String(sd.config))
+	}
+}
+
+// waitUntilMergeable polls GetInfo until the PR carrying commitID is
+// mergeable, sleeping with backoff (5s..30s) up to mergeWaitTimeout.
+// The internal cascade merges changed the branch's head SHA, so checks
+// re-run once on the final branch before a protected landing.
+func (sd *stackediff) waitUntilMergeable(ctx context.Context, commitID string) *github.PullRequest {
+	timeout := sd.config.MergeWaitTimeoutDuration()
+	interval := 5 * time.Second
+	var waited time.Duration
+	for {
+		info := sd.github.GetInfo(ctx, sd.gitcmd)
+		var pr *github.PullRequest
+		for _, p := range info.PullRequests {
+			if p.Commit.CommitID == commitID {
+				pr = p
+				break
+			}
+		}
+		if pr == nil {
+			check(errors.New("pull request disappeared while waiting for checks; run 'git spr status' and re-run 'git spr merge' to resume"))
+			return nil
+		}
+		if pr.Mergeable(sd.config) {
+			return pr
+		}
+		if waited >= timeout {
+			check(fmt.Errorf("timed out after %s waiting for PR #%d to become mergeable; re-run 'git spr merge' to resume", timeout, pr.Number))
+			return nil
+		}
+		fmt.Fprintf(sd.output, "waiting for PR #%d checks (%s elapsed)\n", pr.Number, waited)
+		sd.sleep(interval)
+		waited += interval
+		if interval < 30*time.Second {
+			interval += 5 * time.Second
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/ejoffe/profiletimer"
 	"github.com/ejoffe/rake"
@@ -33,6 +34,7 @@ func NewStackedPR(config *config.Config, github github.GitHubInterface, gitcmd g
 
 		output: os.Stdout,
 		input:  os.Stdin,
+		sleep:  time.Sleep,
 	}
 }
 
@@ -46,7 +48,8 @@ type stackediff struct {
 
 	output       io.Writer
 	input        io.Reader
-	synchronized bool // When true code is executed without goroutines. Allows test to be deterministic
+	synchronized bool                // When true code is executed without goroutines. Allows test to be deterministic
+	sleep        func(time.Duration) // overridable in tests; defaults to time.Sleep
 }
 
 // AmendCommit enables one to easily amend a commit in the middle of a stack
