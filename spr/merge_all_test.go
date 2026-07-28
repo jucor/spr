@@ -400,3 +400,91 @@ func TestMergeAllSetsAndClearsStateAndBlocksUpdate(t *testing.T) {
 		}()
 	})
 }
+
+// TestMergeAllBottomUpResumeNoOpClearsStaleFlag covers the CRITICAL fix:
+// a resumed bottom-up run whose very first GetInfo already finds nothing
+// open (e.g. both PRs landed elsewhere before the crash) must still clear
+// a stale persisted flag, even though this call's own local `marked` never
+// went true.
+func TestMergeAllBottomUpResumeNoOpClearsStaleFlag(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		s.config.Repo.SquashGranularity = "perPR"
+		assert := require.New(t)
+		ctx := context.Background()
+		var stateSaves int
+		s.saveState = func() { stateSaves++ }
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+		key := githubmock.Info.Key()
+		output.Reset()
+
+		// simulate a crashed prior run: flag stuck true, but by the time we
+		// resume both PRs are already gone (landed / closed elsewhere) -
+		// nothing left open for bottomUpMerge to do.
+		s.config.State.MergeAllInProgress[key] = true
+		emptyInfo := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+		}
+		githubmock.InfoQueue = []*github.GitHubInfo{emptyInfo}
+		githubmock.ExpectGetInfo()
+		s.MergePullRequests(ctx, nil)
+		assert.False(s.config.State.MergeAllInProgress[key])
+		assert.Equal(1, stateSaves, "only the clear should save - never marked, nothing to land")
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
+
+// TestMergeAllCascadeNoMergeableResumeClearsStaleFlag covers the CRITICAL fix
+// for the cascade route: topMergeableIndex returning -1 (no PR list is
+// even mergeable) used to bail out via check() without ever touching a
+// stale persisted flag. It must now clear the flag BEFORE the fatal
+// check() panic, so the guard's own "re-run 'git spr merge'" hint is true.
+func TestMergeAllCascadeNoMergeableResumeClearsStaleFlag(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		t.Setenv("SPR_DEBUG", "1")
+		s.config.Repo.StackMergeMode = "mergeAll"
+		assert := require.New(t)
+		ctx := context.Background()
+		var stateSaves int
+		s.saveState = func() { stateSaves++ }
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+		key := githubmock.Info.Key()
+		output.Reset()
+
+		// simulate a crashed prior run: flag stuck true, but by the time we
+		// resume there's nothing mergeable at all (empty PR list -> -1).
+		s.config.State.MergeAllInProgress[key] = true
+		emptyInfo := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+		}
+		githubmock.InfoQueue = []*github.GitHubInfo{emptyInfo}
+		githubmock.ExpectGetInfo()
+		func() {
+			defer func() {
+				r := recover()
+				assert.NotNil(r, "expected the no-mergeable-PRs panic under SPR_DEBUG")
+				assert.Contains(fmt.Sprint(r), "no mergeable pull requests found")
+			}()
+			s.MergePullRequests(ctx, nil)
+		}()
+		assert.False(s.config.State.MergeAllInProgress[key])
+		assert.Equal(1, stateSaves, "the flag was repaired before the fatal check() panic")
+		assert.Contains(output.String(), "cleared stale mergeAll-in-progress flag")
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}

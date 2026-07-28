@@ -28,6 +28,15 @@ func (sd *stackediff) mergeAll(ctx context.Context, count *uint) {
 	sd.runMergeCheckGate(githubInfo)
 	prIndex := topMergeableIndex(sd.config, githubInfo.PullRequests, count)
 	if prIndex == -1 {
+		// Nothing mergeable this run: if the persisted flag is set, it must
+		// be stale (left over from an earlier crashed run — this call never
+		// set it itself, since marking happens further below). Repair it
+		// even on this fatal-exit path, so the guard's own "re-run 'git spr
+		// merge'" recovery hint is actually true on the next attempt.
+		if sd.config.State.MergeAllInProgress[githubInfo.Key()] {
+			fmt.Fprintf(sd.output, "note: cleared stale mergeAll-in-progress flag for this stack\n")
+			sd.clearMergeAllInProgress(githubInfo.Key())
+		}
 		check(errors.New("no mergeable pull requests found in the stack"))
 		return
 	}
@@ -56,7 +65,12 @@ func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
 		}
 		open := info.PullRequests
 		if len(open) == 0 || (count != nil && landed >= int(*count)) {
-			if marked {
+			// Clear based on the PERSISTED flag, not the local `marked` —
+			// a resumed run can find nothing left to do on its very first
+			// iteration (marked still false) while the flag is stuck true
+			// from an earlier crashed run. Checking the persisted state
+			// repairs that case too.
+			if sd.config.State.MergeAllInProgress[info.Key()] {
 				sd.clearMergeAllInProgress(info.Key())
 			}
 			return
@@ -72,9 +86,14 @@ func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
 		if !bottom.MergeStatus.NoConflicts {
 			// squash landed below erased ancestry; restack drops the landed
 			// commit (patch-id) and force-pushes the remaining branches.
-			sd.internalUpdate = true
-			sd.UpdatePullRequests(ctx, nil, nil)
-			sd.internalUpdate = false
+			// The reset is deferred so a panic inside UpdatePullRequests
+			// (e.g. check() under SPR_DEBUG) can't leave internalUpdate
+			// stuck true and silently disable the guard from then on.
+			func() {
+				sd.internalUpdate = true
+				defer func() { sd.internalUpdate = false }()
+				sd.UpdatePullRequests(ctx, nil, nil)
+			}()
 			continue
 		}
 		if !bottom.Mergeable(sd.config) {
