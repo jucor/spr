@@ -357,3 +357,46 @@ func TestMergeAllBottomUpRestackOnConflict(t *testing.T) {
 		githubmock.ExpectationsMet()
 	})
 }
+
+func TestMergeAllSetsAndClearsStateAndBlocksUpdate(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		t.Setenv("SPR_DEBUG", "1")
+		s.config.Repo.StackMergeMode = "mergeAll"
+		assert := require.New(t)
+		ctx := context.Background()
+		var stateSaves int
+		s.saveState = func() { stateSaves++ }
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+		key := githubmock.Info.Key()
+
+		// a successful cascade sets the flag then clears it (2 saves)
+		githubmock.ExpectGetInfo()
+		githubmock.ExpectCommentPullRequest(c2)
+		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectGetInfo() // final wait iteration
+		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
+		s.MergePullRequests(ctx, nil)
+		assert.False(s.config.State.MergeAllInProgress[key])
+		assert.Equal(2, stateSaves)
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+		output.Reset()
+
+		// with the flag set (simulating a crashed run), spr update refuses
+		s.config.State.MergeAllInProgress[key] = true
+		githubmock.ExpectGetInfo()
+		gitmock.ExpectFetch()
+		func() {
+			defer func() {
+				r := recover()
+				assert.NotNil(r, "update must refuse during an in-progress mergeAll")
+				assert.Contains(fmt.Sprint(r), "merge in progress")
+			}()
+			s.UpdatePullRequests(ctx, nil, nil)
+		}()
+	})
+}

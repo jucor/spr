@@ -31,6 +31,11 @@ func (sd *stackediff) mergeAll(ctx context.Context, count *uint) {
 		check(errors.New("no mergeable pull requests found in the stack"))
 		return
 	}
+	// Only mark in-progress once the gate and mergeability check have
+	// passed — nothing below this point returns without either landing at
+	// least one PR (cleared at cascadeMerge's end) or panicking, which is
+	// the actual "resume via 'git spr merge'" scenario the guard protects.
+	sd.markMergeAllInProgress(githubInfo.Key())
 	sd.cascadeMerge(ctx, githubInfo, prIndex, mergeMethod)
 }
 
@@ -42,6 +47,7 @@ func (sd *stackediff) mergeAll(ctx context.Context, count *uint) {
 func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
 	landed := 0
 	gateChecked := false
+	marked := false
 	for {
 		info := sd.github.GetInfo(ctx, sd.gitcmd)
 		if !gateChecked {
@@ -50,13 +56,25 @@ func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
 		}
 		open := info.PullRequests
 		if len(open) == 0 || (count != nil && landed >= int(*count)) {
+			if marked {
+				sd.clearMergeAllInProgress(info.Key())
+			}
 			return
+		}
+		if !marked {
+			// Only mark in-progress once we know there's at least one PR to
+			// land — a no-op call (nothing open) never partially merged
+			// anything, so it should never leave a dangling flag behind.
+			sd.markMergeAllInProgress(info.Key())
+			marked = true
 		}
 		bottom := open[0]
 		if !bottom.MergeStatus.NoConflicts {
 			// squash landed below erased ancestry; restack drops the landed
 			// commit (patch-id) and force-pushes the remaining branches.
+			sd.internalUpdate = true
 			sd.UpdatePullRequests(ctx, nil, nil)
+			sd.internalUpdate = false
 			continue
 		}
 		if !bottom.Mergeable(sd.config) {
@@ -122,6 +140,8 @@ func (sd *stackediff) cascadeMerge(ctx context.Context, githubInfo *github.GitHu
 		prs[i].Merged = true
 		fmt.Fprintf(sd.output, "%s\n", prs[i].String(sd.config))
 	}
+
+	sd.clearMergeAllInProgress(githubInfo.Key())
 }
 
 // waitUntilMergeable polls GetInfo until the PR carrying commitID is
@@ -159,6 +179,29 @@ func (sd *stackediff) waitUntilMergeable(ctx context.Context, commitID string) *
 			interval += 5 * time.Second
 		}
 	}
+}
+
+// markMergeAllInProgress persists that a mergeAll stack merge has started
+// for this stack, so a `spr update` run mid-cascade (crash, network blip,
+// GitHub 500) refuses instead of opening duplicate PRs for commits whose
+// PRs were internally merged. Cleared by clearMergeAllInProgress once the
+// merge completes; if it's still set on the next run, that's the signal a
+// previous mergeAll didn't finish.
+func (sd *stackediff) markMergeAllInProgress(key string) {
+	if sd.config.State.MergeAllInProgress == nil {
+		sd.config.State.MergeAllInProgress = map[string]bool{}
+	}
+	sd.config.State.MergeAllInProgress[key] = true
+	sd.saveState()
+}
+
+// clearMergeAllInProgress marks a mergeAll stack merge as complete.
+func (sd *stackediff) clearMergeAllInProgress(key string) {
+	if sd.config.State.MergeAllInProgress == nil {
+		sd.config.State.MergeAllInProgress = map[string]bool{}
+	}
+	delete(sd.config.State.MergeAllInProgress, key)
+	sd.saveState()
 }
 
 // deleteRemoteBranchBestEffort deletes a branch whose one dependent PR is

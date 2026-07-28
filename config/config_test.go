@@ -13,7 +13,8 @@ func TestEmptyConfig(t *testing.T) {
 		Repo: &RepoConfig{},
 		User: &UserConfig{},
 		State: &InternalState{
-			MergeCheckCommit: map[string]string{},
+			MergeCheckCommit:   map[string]string{},
+			MergeAllInProgress: map[string]bool{},
 		},
 	}
 	actual := EmptyConfig()
@@ -50,7 +51,8 @@ func TestDefaultConfig(t *testing.T) {
 			BranchPrefix:     "spr",
 		},
 		State: &InternalState{
-			MergeCheckCommit: map[string]string{},
+			MergeCheckCommit:   map[string]string{},
+			MergeAllInProgress: map[string]bool{},
 		},
 	}
 	actual := DefaultConfig()

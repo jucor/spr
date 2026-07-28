@@ -35,6 +35,10 @@ func NewStackedPR(config *config.Config, github github.GitHubInterface, gitcmd g
 		output: os.Stdout,
 		input:  os.Stdin,
 		sleep:  time.Sleep,
+		saveState: func() {
+			rake.LoadSources(config.State,
+				rake.YamlFileWriter(config_parser.InternalConfigFilePath()))
+		},
 	}
 }
 
@@ -50,6 +54,17 @@ type stackediff struct {
 	input        io.Reader
 	synchronized bool                // When true code is executed without goroutines. Allows test to be deterministic
 	sleep        func(time.Duration) // overridable in tests; defaults to time.Sleep
+
+	// saveState persists sd.config.State (e.g. MergeAllInProgress) to the
+	// internal config file. Defaults to a real rake-backed writer in
+	// NewStackedPR; tests must override with a no-op so no unit test ever
+	// touches disk.
+	saveState func()
+	// internalUpdate marks a call to UpdatePullRequests made internally by
+	// spr itself (e.g. bottomUpMerge's restack) rather than by the user
+	// running `spr update`. It bypasses the mergeAll-in-progress guard,
+	// since the in-progress mergeAll is what's driving the call.
+	internalUpdate bool
 }
 
 // AmendCommit enables one to easily amend a commit in the middle of a stack
@@ -294,6 +309,11 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 	reviewers = append(sd.config.Repo.DefaultReviewers, reviewers...)
 	githubInfo := sd.fetchAndGetGitHubInfo(ctx)
 	if githubInfo == nil {
+		return
+	}
+	if !sd.internalUpdate && sd.config.State.MergeAllInProgress[githubInfo.Key()] {
+		check(errors.New("mergeAll stack merge in progress for this stack; " +
+			"re-run 'git spr merge' to finish it before updating"))
 		return
 	}
 	sd.profiletimer.Step("UpdatePullRequests::FetchAndGetGitHubInfo")

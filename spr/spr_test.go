@@ -36,6 +36,7 @@ func makeTestObjects(t *testing.T, synchronized bool) (
 		LocalBranch:  "master",
 	}
 	s = NewStackedPR(cfg, githubmock, gitmock)
+	s.saveState = func() {} // no unit test should ever write a real state file
 	output = &bytes.Buffer{}
 	s.output = output
 	input = &bytes.Buffer{}
