@@ -271,6 +271,9 @@ VERSION: fork of {{.Version}}
 				Name:  "merge",
 				Usage: "Merge all mergeable pull requests",
 				Action: func(c *cli.Context) error {
+					if c.Bool("merge-all") {
+						cfg.Repo.StackMergeMode = "mergeAll"
+					}
 					if c.IsSet("count") {
 						count := c.Uint("count")
 						stackedpr.MergePullRequests(ctx, &count)
@@ -285,6 +288,10 @@ VERSION: fork of {{.Version}}
 						Name:    "count",
 						Aliases: []string{"c"},
 						Usage:   "Merge a specified number of pull requests from the bottom of the stack",
+					},
+					&cli.BoolFlag{
+						Name:  "merge-all",
+						Usage: "Merge every PR in the stack (mergeAll mode) instead of merging the top and closing the rest",
 					},
 				},
 			},

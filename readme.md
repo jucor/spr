@@ -173,6 +173,27 @@ spr finds the top mergeable PR in the stack, combines all commits up to it into 
 
 Use `--count N` to merge only the bottom N pull requests.
 
+### Merging the whole stack (mergeAll)
+
+By default (`stackMergeMode: tip`), `git spr merge` merges only the top PR and closes the rest -- fast, but closed PRs lose their review history, and deleting their branches relies on GitHub's deletion-triggered retargeting to keep the PRs above alive. That automation is known to sometimes close those PRs instead of retargeting them.
+
+Set `stackMergeMode: mergeAll` in `.spr.yml` (or pass `--merge-all` to `git spr merge` for a one-off run) to land the stack so that **every PR ends MERGED**, with no step depending on GitHub's automatic retargeting:
+
+```shell
+> git spr merge --merge-all
+MERGED #58 Feature 1
+MERGED #59 Feature 2
+MERGED #60 Feature 3
+MERGED #61 Feature 4
+```
+
+For `mergeMethod: rebase` or `merge`, PRs land tip-down: each PR merges into the base it already has, so no PR ever changes base and at most one CI wait is needed, on the final landing. For `mergeMethod: squash`, `squashGranularity` controls the trade-off:
+
+- `perStack` (default): the whole stack still collapses into one squash commit on the target branch, same tip-down landing as above -- at most one CI wait.
+- `perPR`: one squash commit per PR, landing bottom-up. Squashing erases commit ancestry, so whenever a landed PR's changes overlap a PR still open above it, spr restacks (rebase + force-push, the same flow as `git spr update`) and waits for CI again -- a full stack can incur one restack-and-wait per overlapping level.
+
+`mergeWaitTimeout` (default `10m`) bounds how long `git spr merge` polls for a PR to become mergeable/merged before giving up. On timeout it exits with an error; re-running `git spr merge` resumes the merge where it left off -- PRs already MERGED are skipped.
+
 ### Merge status bits
 
 Each PR shows four status bits:
@@ -221,6 +242,9 @@ Configuration is created automatically on first run. Repository config lives in 
 | `githubHost` | str | `github.com` | GitHub host (update for GitHub Enterprise) |
 | `mergeMethod` | str | `rebase` | Merge method: `rebase`, `squash`, or `merge` |
 | `mergeQueue` | bool | `false` | Use GitHub merge queue |
+| `stackMergeMode` | str | `tip` | `tip` merges the top PR and closes the rest; `mergeAll` merges every PR in the stack (see [Merging the whole stack](#merging-the-whole-stack-mergeall)) |
+| `squashGranularity` | str | `perStack` | With `stackMergeMode: mergeAll` and `mergeMethod: squash`: `perStack` lands one squash commit for the whole stack, `perPR` lands one per PR |
+| `mergeWaitTimeout` | str | `10m` | With `stackMergeMode: mergeAll`: how long to poll for a PR to become mergeable/merged before giving up |
 | `prTemplateType` | str | `stack` | PR template: `stack`, `basic`, `why_what`, or `custom` |
 | `prTemplatePath` | str | | Path to custom PR template file (auto-sets type to `custom`) |
 | `prTemplateInsertStart` | str | | Marker in custom template for commit body insertion start |
