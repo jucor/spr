@@ -436,6 +436,12 @@ func (sd *stackediff) UpdatePullRequests(ctx context.Context, reviewers []string
 //	their commits have already been merged.
 func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
 	sd.profiletimer.Step("MergePullRequests::Start")
+
+	if sd.config.MergeAllEnabled() {
+		sd.mergeAll(ctx, count)
+		return
+	}
+
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 	sd.profiletimer.Step("MergePullRequests::getGitHubInfo")
 
