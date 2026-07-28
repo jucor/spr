@@ -78,9 +78,9 @@ func testMergeAllCascadeThreeCommits(t *testing.T, sync bool) {
 		// No UpdatePullRequest (no retarget!) and no ClosePullRequest, ever.
 		githubmock.ExpectGetInfo()
 		githubmock.ExpectCommentPullRequest(c3)
-		githubmock.ExpectMergePullRequest(c3, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c3, genclient.PullRequestMergeMethod_REBASE, "")
 		githubmock.ExpectCommentPullRequest(c2)
-		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_REBASE, "")
 		githubmock.ExpectGetInfo() // wait loop's first, immediately-green iteration
 		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
 		s.MergePullRequests(ctx, nil)
@@ -88,6 +88,58 @@ func testMergeAllCascadeThreeCommits(t *testing.T, sync bool) {
 		assert.Equal("MERGED   1 : test commit 1", lines[0])
 		assert.Equal("MERGED   1 : test commit 2", lines[1])
 		assert.Equal("MERGED   1 : test commit 3", lines[2])
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
+
+func TestMergeAllCascadeMergeQueue(t *testing.T) {
+	testMergeAllCascadeMergeQueue(t, true)
+	testMergeAllCascadeMergeQueue(t, false)
+}
+
+// testMergeAllCascadeMergeQueue mirrors testMergeAllCascadeThreeCommits but
+// with mergeQueue enabled: internal merges still go direct (identical to
+// the non-queue case - internal merges never touch the queue), but the
+// final merge routes through MergePullRequest's config-driven queue path
+// (no wait for br_0's checks - the queue runs its own CI), and PR_0 is
+// reported as enqueued rather than merged.
+func testMergeAllCascadeMergeQueue(t *testing.T, sync bool) {
+	t.Run(fmt.Sprintf("Sync: %v", sync), func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, sync)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeQueue = true
+		assert := require.New(t)
+		ctx := context.Background()
+		var stateSaves int
+		s.saveState = func() { stateSaves++ }
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		c3 := git.Commit{CommitID: "00000003", CommitHash: "c300000000000000000000000000000000000000", Subject: "test commit 3"}
+		populateThreePRs(t, s, gitmock, githubmock, output, c1, c2, c3)
+		key := githubmock.Info.Key()
+
+		// cascade: comment+direct-merge top-down for the internal PRs, then
+		// the final PR is enqueued (plain MergePullRequest, config routing
+		// handles the queue) - no wait-loop GetInfo at all.
+		githubmock.ExpectGetInfo()
+		githubmock.ExpectCommentPullRequest(c3)
+		githubmock.ExpectMergePullRequestDirect(c3, genclient.PullRequestMergeMethod_REBASE, "")
+		githubmock.ExpectCommentPullRequest(c2)
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_REBASE, "")
+		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
+		s.MergePullRequests(ctx, nil)
+		lines := strings.Split(output.String(), "\n")
+		// c2/c3 are genuinely merged already; c1 (PR_0) is only enqueued,
+		// printed last.
+		assert.Equal("MERGED   1 : test commit 2", lines[0])
+		assert.Equal("MERGED   1 : test commit 3", lines[1])
+		assert.True(strings.HasPrefix(lines[2], "added to merge queue:"), "got: %q", lines[2])
+		// the queue branch clears the in-progress flag at its own successful
+		// end too - not just the non-queue path (Task 10's invariant).
+		assert.False(s.config.State.MergeAllInProgress[key])
+		assert.Equal(2, stateSaves, "mark once, clear once")
 		gitmock.ExpectationsMet()
 		githubmock.ExpectationsMet()
 	})
@@ -115,7 +167,7 @@ func testMergeAllCascadeCountWithSurvivor(t *testing.T, sync bool) {
 		// survivor c3 explicitly retargeted to master BEFORE the first merge
 		githubmock.ExpectUpdatePullRequest(c3, nil)
 		githubmock.ExpectCommentPullRequest(c2)
-		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_REBASE, "")
 		gitmock.ExpectDeleteBranch("from_branch")
 		githubmock.ExpectGetInfo() // wait loop's first, immediately-green iteration
 		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
@@ -150,9 +202,9 @@ func testMergeAllCascadeSquashMessages(t *testing.T, sync bool) {
 
 		githubmock.ExpectGetInfo()
 		githubmock.ExpectCommentPullRequest(c3)
-		githubmock.ExpectMergePullRequestWithMessage(c3, genclient.PullRequestMergeMethod_SQUASH, "test commit 3")
+		githubmock.ExpectMergePullRequestDirect(c3, genclient.PullRequestMergeMethod_SQUASH, "test commit 3")
 		githubmock.ExpectCommentPullRequest(c2)
-		githubmock.ExpectMergePullRequestWithMessage(c2, genclient.PullRequestMergeMethod_SQUASH, "test commit 2")
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_SQUASH, "test commit 2")
 		githubmock.ExpectGetInfo() // wait loop's first, immediately-green iteration
 		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1")
 		s.MergePullRequests(ctx, nil)
@@ -211,9 +263,9 @@ func TestMergeAllCascadeWaitsForFinalChecks(t *testing.T) {
 		}
 		githubmock.ExpectGetInfo()
 		githubmock.ExpectCommentPullRequest(c3)
-		githubmock.ExpectMergePullRequest(c3, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c3, genclient.PullRequestMergeMethod_REBASE, "")
 		githubmock.ExpectCommentPullRequest(c2)
-		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_REBASE, "")
 		githubmock.ExpectGetInfo() // wait iteration 1
 		githubmock.ExpectGetInfo() // wait iteration 2
 		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
@@ -266,6 +318,72 @@ func TestMergeAllBottomUpDisjoint(t *testing.T) {
 	})
 }
 
+// TestMergeAllBottomUpMergeQueue mirrors TestMergeAllBottomUpDisjoint but
+// with mergeQueue enabled: each landing's MergePullRequest call only
+// enqueues the PR (config-driven routing), so bottomUpMerge must call
+// waitUntilMerged and poll GetInfo until the queue actually merges it
+// before treating the PR as landed and moving on.
+func TestMergeAllBottomUpMergeQueue(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		s.config.Repo.SquashGranularity = "perPR"
+		s.config.Repo.MergeQueue = true
+		assert := require.New(t)
+		ctx := context.Background()
+		var slept []time.Duration
+		s.sleep = func(d time.Duration) { slept = append(slept, d) }
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+
+		infoAfterC1 := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+			// c1 landed: only c2's PR remains open, no conflicts (disjoint stack)
+			PullRequests: []*github.PullRequest{githubmock.Info.PullRequests[1]},
+		}
+		infoEmpty := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+		}
+		githubmock.InfoQueue = []*github.GitHubInfo{
+			githubmock.Info, // iteration 1
+			githubmock.Info, // waitUntilMerged(c1) poll 1: c1 still open
+			infoAfterC1,     // waitUntilMerged(c1) poll 2: c1 gone -> merged
+			infoAfterC1,     // iteration 2
+			infoEmpty,       // waitUntilMerged(c2) poll 1: c2 gone -> merged
+			infoEmpty,       // iteration 3: empty -> loop ends
+		}
+
+		githubmock.ExpectGetInfo()                                                                                 // iteration 1
+		githubmock.ExpectUpdatePullRequest(c2, nil)                                                                // retarget next BEFORE merging bottom
+		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1") // queue path: enqueue
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged(c1) poll 1
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged(c1) poll 2
+		githubmock.ExpectGetInfo()                                                                                 // iteration 2
+		githubmock.ExpectMergePullRequestWithMessage(c2, genclient.PullRequestMergeMethod_SQUASH, "test commit 2") // queue path: enqueue
+		githubmock.ExpectGetInfo()                                                                                 // waitUntilMerged(c2) poll 1
+		githubmock.ExpectGetInfo()                                                                                 // iteration 3: empty -> loop ends
+		s.MergePullRequests(ctx, nil)
+		lines := strings.Split(output.String(), "\n")
+		// waitUntilMerged(c1)'s first poll finds c1 still open (not yet
+		// actually merged by the queue), so it prints a "waiting" line
+		// before its retry finds it gone; waitUntilMerged(c2) finds it gone
+		// on its very first poll, so no such line precedes c2's MERGED line.
+		assert.Contains(lines[0], "waiting for the merge queue to merge PR #1")
+		assert.Equal("MERGED   1 : test commit 1", lines[1])
+		assert.Equal("MERGED   1 : test commit 2", lines[2])
+		assert.NotEmpty(slept, "waitUntilMerged(c1) must sleep between its two polls")
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
+
 func TestMergeAllCascadeWaitTimeout(t *testing.T) {
 	t.Run("Sync: true", func(t *testing.T) {
 		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
@@ -286,7 +404,7 @@ func TestMergeAllCascadeWaitTimeout(t *testing.T) {
 		}
 		githubmock.ExpectGetInfo()
 		githubmock.ExpectCommentPullRequest(c2)
-		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_REBASE, "")
 		githubmock.ExpectGetInfo()
 		githubmock.ExpectGetInfo()
 		defer func() {
@@ -376,7 +494,7 @@ func TestMergeAllSetsAndClearsStateAndBlocksUpdate(t *testing.T) {
 		// a successful cascade sets the flag then clears it (2 saves)
 		githubmock.ExpectGetInfo()
 		githubmock.ExpectCommentPullRequest(c2)
-		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		githubmock.ExpectMergePullRequestDirect(c2, genclient.PullRequestMergeMethod_REBASE, "")
 		githubmock.ExpectGetInfo() // final wait iteration
 		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
 		s.MergePullRequests(ctx, nil)

@@ -566,6 +566,58 @@ func (c *client) CommentPullRequest(ctx context.Context, pr *github.PullRequest,
 
 func (c *client) MergePullRequest(ctx context.Context,
 	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *github.MergeCommitMessage) {
+	if !c.config.Repo.MergeQueue {
+		c.mergePullRequestDirect(ctx, pr, mergeMethod, msg)
+		return
+	}
+
+	log.Debug().
+		Interface("PR", pr).
+		Str("mergeMethod", string(mergeMethod)).
+		Msg("MergePullRequest (queue)")
+
+	var commitHeadline, commitBody *string
+	if msg != nil && mergeMethod != genclient.PullRequestMergeMethod_REBASE {
+		commitHeadline = &msg.Headline
+		commitBody = &msg.Body
+	}
+
+	_, err := c.api.AutoMergePullRequest(ctx, genclient.EnablePullRequestAutoMergeInput{
+		PullRequestId:  pr.ID,
+		MergeMethod:    &mergeMethod,
+		CommitHeadline: commitHeadline,
+		CommitBody:     commitBody,
+	})
+	if err != nil {
+		log.Fatal().
+			Str("id", pr.ID).
+			Int("number", pr.Number).
+			Str("title", pr.Title).
+			Err(err).
+			Msg("pull request merge failed")
+	}
+	check(err)
+
+	if c.config.User.LogGitHubCalls {
+		fmt.Printf("> github merge %d : %s\n", pr.Number, pr.Title)
+	}
+}
+
+// MergePullRequestDirect always performs the direct merge mutation
+// (mergePullRequest), ignoring the mergeQueue config. Used by mergeAll's
+// cascade for internal merges into unprotected spr-managed branches, where
+// enablePullRequestAutoMerge (what MergePullRequest calls instead, under
+// mergeQueue) errors out on a base without branch protection.
+func (c *client) MergePullRequestDirect(ctx context.Context,
+	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *github.MergeCommitMessage) {
+	c.mergePullRequestDirect(ctx, pr, mergeMethod, msg)
+}
+
+// mergePullRequestDirect performs the direct merge mutation
+// (mergePullRequest GraphQL call). It backs both MergePullRequest's
+// non-queue path and MergePullRequestDirect's always-direct behavior.
+func (c *client) mergePullRequestDirect(ctx context.Context,
+	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *github.MergeCommitMessage) {
 	log.Debug().
 		Interface("PR", pr).
 		Str("mergeMethod", string(mergeMethod)).
@@ -577,22 +629,12 @@ func (c *client) MergePullRequest(ctx context.Context,
 		commitBody = &msg.Body
 	}
 
-	var err error
-	if c.config.Repo.MergeQueue {
-		_, err = c.api.AutoMergePullRequest(ctx, genclient.EnablePullRequestAutoMergeInput{
-			PullRequestId:  pr.ID,
-			MergeMethod:    &mergeMethod,
-			CommitHeadline: commitHeadline,
-			CommitBody:     commitBody,
-		})
-	} else {
-		_, err = c.api.MergePullRequest(ctx, genclient.MergePullRequestInput{
-			PullRequestId:  pr.ID,
-			MergeMethod:    &mergeMethod,
-			CommitHeadline: commitHeadline,
-			CommitBody:     commitBody,
-		})
-	}
+	_, err := c.api.MergePullRequest(ctx, genclient.MergePullRequestInput{
+		PullRequestId:  pr.ID,
+		MergeMethod:    &mergeMethod,
+		CommitHeadline: commitHeadline,
+		CommitBody:     commitBody,
+	})
 	if err != nil {
 		log.Fatal().
 			Str("id", pr.ID).

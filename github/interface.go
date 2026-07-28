@@ -37,6 +37,14 @@ type GitHubInterface interface {
 	// MergePullRequest merged the given pull request
 	MergePullRequest(ctx context.Context, pr *PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *MergeCommitMessage)
 
+	// MergePullRequestDirect always performs the direct merge mutation,
+	// ignoring the mergeQueue config. mergeAll's cascade uses it for
+	// internal merges into unprotected spr-managed branches, where
+	// enablePullRequestAutoMerge (what MergePullRequest would otherwise
+	// call under mergeQueue) errors out — queue protection applies per
+	// target branch, and only trunk is queue-protected.
+	MergePullRequestDirect(ctx context.Context, pr *PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *MergeCommitMessage)
+
 	// ClosePullRequest closes the given pull request
 	ClosePullRequest(ctx context.Context, pr *PullRequest)
 }

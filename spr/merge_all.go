@@ -105,6 +105,15 @@ func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
 		}
 		sd.github.MergePullRequest(ctx, bottom, genclient.PullRequestMergeMethod_SQUASH,
 			&github.MergeCommitMessage{Headline: bottom.Commit.Subject, Body: bottom.Commit.Body})
+		if sd.config.Repo.MergeQueue {
+			// Every landing here targets trunk, so under mergeQueue the call
+			// above only enqueued it - MergePullRequest's config-driven
+			// routing called enablePullRequestAutoMerge, not an actual
+			// merge. Wait for the queue to actually land it before treating
+			// it as merged (branch deletion, the MERGED print, and the next
+			// iteration's retarget all assume it's really gone).
+			sd.waitUntilMerged(ctx, bottom.Commit.CommitID)
+		}
 		if sd.config.User.DeleteMergedBranches {
 			sd.deleteRemoteBranchBestEffort(ctx, bottom.FromBranch)
 		}
@@ -137,10 +146,35 @@ func (sd *stackediff) cascadeMerge(ctx context.Context, githubInfo *github.GitHu
 			"Merging as part of a stack cascade; the stack lands on %s via pull request #%d",
 			sd.config.Repo.GitHubBranch, prs[0].Number)
 		sd.github.CommentPullRequest(ctx, pr, comment)
-		sd.github.MergePullRequest(ctx, pr, mergeMethod, cascadeInternalMessage(mergeMethod, pr.Commit))
+		// Internal merges always use the direct mutation, never the queue:
+		// they target unprotected spr-managed branches, and
+		// enablePullRequestAutoMerge errors out on a base without branch
+		// protection. Queue protection applies per target branch, and only
+		// trunk is queue-protected, so this is legitimate in every mode
+		// (identical to MergePullRequest's non-queue behavior when there's
+		// no queue at all).
+		sd.github.MergePullRequestDirect(ctx, pr, mergeMethod, cascadeInternalMessage(mergeMethod, pr.Commit))
 		if sd.config.User.DeleteMergedBranches {
 			sd.deleteRemoteBranchBestEffort(ctx, pr.FromBranch)
 		}
+	}
+
+	if sd.config.Repo.MergeQueue {
+		// The queue runs its own CI on the temporary merge branch, so there's
+		// no need to wait for br_0's checks to re-run here (unlike the
+		// non-queue path below). This call only enqueues PR_0 - it is not
+		// yet actually merged, so its branch is left alone and it is not
+		// marked Merged. Every other PR in the range is already genuinely
+		// merged above; a queue rejection leaves exactly one open PR
+		// carrying the whole stack, recoverable by re-running 'git spr merge'.
+		sd.github.MergePullRequest(ctx, prs[0], mergeMethod, cascadeFinalMessage(mergeMethod, prs[:prIndex+1]))
+		for i := 1; i <= prIndex; i++ {
+			prs[i].Merged = true
+			fmt.Fprintf(sd.output, "%s\n", prs[i].String(sd.config))
+		}
+		fmt.Fprintf(sd.output, "added to merge queue: %s\n", prs[0].String(sd.config))
+		sd.clearMergeAllInProgress(githubInfo.Key())
+		return
 	}
 
 	finalPR := prs[0]
@@ -192,6 +226,41 @@ func (sd *stackediff) waitUntilMergeable(ctx context.Context, commitID string) *
 			return nil
 		}
 		fmt.Fprintf(sd.output, "waiting for PR #%d checks (%s elapsed)\n", pr.Number, waited)
+		sd.sleep(interval)
+		waited += interval
+		if interval < 30*time.Second {
+			interval += 5 * time.Second
+		}
+	}
+}
+
+// waitUntilMerged polls GetInfo until no open pull request carries
+// commitID, sleeping with backoff (5s..30s) up to mergeWaitTimeout. Clone
+// of waitUntilMergeable with the inverse success test: under mergeQueue,
+// MergePullRequest only enqueues a PR (it doesn't merge it), so bottom-up
+// landings must wait for the queue to actually merge the commit before
+// retargeting/reporting the next PR as landed.
+func (sd *stackediff) waitUntilMerged(ctx context.Context, commitID string) {
+	timeout := sd.config.MergeWaitTimeoutDuration()
+	interval := 5 * time.Second
+	var waited time.Duration
+	for {
+		info := sd.github.GetInfo(ctx, sd.gitcmd)
+		var pr *github.PullRequest
+		for _, p := range info.PullRequests {
+			if p.Commit.CommitID == commitID {
+				pr = p
+				break
+			}
+		}
+		if pr == nil {
+			return
+		}
+		if waited >= timeout {
+			check(fmt.Errorf("timed out waiting for the merge queue to merge PR #%d; re-run 'git spr merge' to resume", pr.Number))
+			return
+		}
+		fmt.Fprintf(sd.output, "waiting for the merge queue to merge PR #%d (%s elapsed)\n", pr.Number, waited)
 		sd.sleep(interval)
 		waited += interval
 		if interval < 30*time.Second {

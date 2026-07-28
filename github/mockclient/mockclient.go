@@ -127,6 +127,21 @@ func (c *MockClient) MergePullRequest(ctx context.Context,
 	})
 }
 
+func (c *MockClient) MergePullRequestDirect(ctx context.Context,
+	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *github.MergeCommitMessage) {
+	fmt.Printf("HUB: MergePullRequestDirect, method=%q\n", mergeMethod)
+	var headline string
+	if msg != nil {
+		headline = msg.Headline
+	}
+	c.verifyExpectation(expectation{
+		op:          mergePullRequestDirectOP,
+		commit:      pr.Commit,
+		mergeMethod: mergeMethod,
+		msgHeadline: headline,
+	})
+}
+
 func (c *MockClient) ClosePullRequest(ctx context.Context, pr *github.PullRequest) {
 	fmt.Printf("HUB: ClosePullRequest\n")
 	c.verifyExpectation(expectation{
@@ -218,6 +233,18 @@ func (c *MockClient) ExpectMergePullRequestWithMessage(commit git.Commit,
 	})
 }
 
+func (c *MockClient) ExpectMergePullRequestDirect(commit git.Commit,
+	mergeMethod genclient.PullRequestMergeMethod, msgHeadline string) {
+	c.expectMutex.Lock()
+	defer c.expectMutex.Unlock()
+	c.expect = append(c.expect, expectation{
+		op:          mergePullRequestDirectOP,
+		commit:      commit,
+		mergeMethod: mergeMethod,
+		msgHeadline: msgHeadline,
+	})
+}
+
 func (c *MockClient) ExpectClosePullRequest(commit git.Commit) {
 	c.expectMutex.Lock()
 	defer c.expectMutex.Unlock()
@@ -266,14 +293,15 @@ func (c *MockClient) ExpectationsMet() {
 type operation string
 
 const (
-	getInfoOP            operation = "GetInfo"
-	getAssignableUsersOP operation = "GetAssignableUsers"
-	createPullRequestOP  operation = "CreatePullRequest"
-	updatePullRequestOP  operation = "UpdatePullRequest"
-	addReviewersOP       operation = "AddReviewers"
-	commentPullRequestOP operation = "CommentPullRequest"
-	mergePullRequestOP   operation = "MergePullRequest"
-	closePullRequestOP   operation = "ClosePullRequest"
+	getInfoOP                operation = "GetInfo"
+	getAssignableUsersOP     operation = "GetAssignableUsers"
+	createPullRequestOP      operation = "CreatePullRequest"
+	updatePullRequestOP      operation = "UpdatePullRequest"
+	addReviewersOP           operation = "AddReviewers"
+	commentPullRequestOP     operation = "CommentPullRequest"
+	mergePullRequestOP       operation = "MergePullRequest"
+	mergePullRequestDirectOP operation = "MergePullRequestDirect"
+	closePullRequestOP       operation = "ClosePullRequest"
 )
 
 type expectation struct {
