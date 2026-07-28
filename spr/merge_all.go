@@ -35,6 +35,16 @@ func (sd *stackediff) cascadeMerge(ctx context.Context, githubInfo *github.GitHu
 	prIndex int, mergeMethod genclient.PullRequestMergeMethod) {
 	prs := githubInfo.PullRequests
 
+	if prIndex+1 < len(prs) {
+		// A surviving PR sits above the merged range, based on the branch of
+		// the PR directly below it, which auto-delete (or our own deletion)
+		// will remove on the FIRST merge below. Retarget it explicitly NOW —
+		// lab-verified: relying on GitHub's automatic retargeting loses a
+		// race and closes the PR.
+		survivor := prs[prIndex+1]
+		sd.github.UpdatePullRequest(ctx, sd.gitcmd, githubInfo, prs, survivor, survivor.Commit, nil)
+	}
+
 	for i := prIndex; i >= 1; i-- {
 		pr := prs[i]
 		comment := fmt.Sprintf(
@@ -42,13 +52,28 @@ func (sd *stackediff) cascadeMerge(ctx context.Context, githubInfo *github.GitHu
 			sd.config.Repo.GitHubBranch, prs[0].Number)
 		sd.github.CommentPullRequest(ctx, pr, comment)
 		sd.github.MergePullRequest(ctx, pr, mergeMethod, cascadeInternalMessage(mergeMethod, pr.Commit))
+		if sd.config.User.DeleteMergedBranches {
+			sd.deleteRemoteBranchBestEffort(ctx, pr.FromBranch)
+		}
 	}
 
 	sd.github.MergePullRequest(ctx, prs[0], mergeMethod, cascadeFinalMessage(mergeMethod, prs[:prIndex+1]))
+	if sd.config.User.DeleteMergedBranches {
+		sd.deleteRemoteBranchBestEffort(ctx, prs[0].FromBranch)
+	}
 
 	for i := 0; i <= prIndex; i++ {
 		prs[i].Merged = true
 		fmt.Fprintf(sd.output, "%s\n", prs[i].String(sd.config))
+	}
+}
+
+// deleteRemoteBranchBestEffort deletes a branch whose one dependent PR is
+// already merged or retargeted. Failure is fine — repos with
+// "Automatically delete head branches" have already deleted it.
+func (sd *stackediff) deleteRemoteBranchBestEffort(ctx context.Context, branch string) {
+	if err := sd.gitcmd.DeleteRemoteBranch(ctx, branch); err != nil {
+		fmt.Fprintf(sd.output, "note: could not delete remote branch %q (already deleted?): %v\n", branch, err)
 	}
 }
 

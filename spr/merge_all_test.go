@@ -70,3 +70,39 @@ func testMergeAllCascadeThreeCommits(t *testing.T, sync bool) {
 		githubmock.ExpectationsMet()
 	})
 }
+
+func TestMergeAllCascadeCountWithSurvivor(t *testing.T) {
+	testMergeAllCascadeCountWithSurvivor(t, true)
+	testMergeAllCascadeCountWithSurvivor(t, false)
+}
+
+func testMergeAllCascadeCountWithSurvivor(t *testing.T, sync bool) {
+	t.Run(fmt.Sprintf("Sync: %v", sync), func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, sync)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.User.DeleteMergedBranches = true
+		assert := require.New(t)
+		ctx := context.Background()
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		c3 := git.Commit{CommitID: "00000003", CommitHash: "c300000000000000000000000000000000000000", Subject: "test commit 3"}
+		populateThreePRs(t, s, gitmock, githubmock, output, c1, c2, c3)
+
+		githubmock.ExpectGetInfo()
+		// survivor c3 explicitly retargeted to master BEFORE the first merge
+		githubmock.ExpectUpdatePullRequest(c3, nil)
+		githubmock.ExpectCommentPullRequest(c2)
+		githubmock.ExpectMergePullRequest(c2, genclient.PullRequestMergeMethod_REBASE)
+		gitmock.ExpectDeleteBranch("from_branch")
+		githubmock.ExpectMergePullRequest(c1, genclient.PullRequestMergeMethod_REBASE)
+		gitmock.ExpectDeleteBranch("from_branch")
+		count := uint(2)
+		s.MergePullRequests(ctx, &count)
+		lines := strings.Split(output.String(), "\n")
+		assert.Equal("MERGED   1 : test commit 1", lines[0])
+		assert.Equal("MERGED   1 : test commit 2", lines[1])
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
