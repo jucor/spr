@@ -439,36 +439,9 @@ func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 	sd.profiletimer.Step("MergePullRequests::getGitHubInfo")
 
-	// MergeCheck
-	if sd.config.Repo.MergeCheck != "" {
-		localCommits := git.GetLocalCommitStack(sd.config, sd.gitcmd)
-		if len(localCommits) > 0 {
-			lastCommit := localCommits[len(localCommits)-1]
-			checkedCommit, found := sd.config.State.MergeCheckCommit[githubInfo.Key()]
+	sd.runMergeCheckGate(githubInfo)
 
-			if !found {
-				check(errors.New("need to run merge check 'spr check' before merging"))
-			} else if checkedCommit != "SKIP" && lastCommit.CommitHash != checkedCommit {
-				check(errors.New("need to run merge check 'spr check' before merging"))
-			}
-		}
-	}
-
-	// Figure out top most pr in the stack that is mergeable
-	var prIndex int
-	for prIndex = 0; prIndex < len(githubInfo.PullRequests); prIndex++ {
-		pr := githubInfo.PullRequests[prIndex]
-		if !pr.Mergeable(sd.config) {
-			prIndex--
-			break
-		}
-		if count != nil && (prIndex+1) == int(*count) {
-			break
-		}
-	}
-	if prIndex == len(githubInfo.PullRequests) {
-		prIndex--
-	}
+	prIndex := topMergeableIndex(sd.config, githubInfo.PullRequests, count)
 	if prIndex == -1 {
 		check(errors.New("no mergeable pull requests found in the stack"))
 		return
@@ -509,6 +482,45 @@ func (sd *stackediff) MergePullRequests(ctx context.Context, count *uint) {
 	}
 
 	sd.profiletimer.Step("MergePullRequests::End")
+}
+
+// runMergeCheckGate verifies that the merge check has been run on the
+// current top of stack before allowing a merge to proceed.
+func (sd *stackediff) runMergeCheckGate(githubInfo *github.GitHubInfo) {
+	// MergeCheck
+	if sd.config.Repo.MergeCheck != "" {
+		localCommits := git.GetLocalCommitStack(sd.config, sd.gitcmd)
+		if len(localCommits) > 0 {
+			lastCommit := localCommits[len(localCommits)-1]
+			checkedCommit, found := sd.config.State.MergeCheckCommit[githubInfo.Key()]
+
+			if !found {
+				check(errors.New("need to run merge check 'spr check' before merging"))
+			} else if checkedCommit != "SKIP" && lastCommit.CommitHash != checkedCommit {
+				check(errors.New("need to run merge check 'spr check' before merging"))
+			}
+		}
+	}
+}
+
+// topMergeableIndex figures out the top most pr in the stack that is
+// mergeable, returning -1 when nothing is mergeable.
+func topMergeableIndex(cfg *config.Config, prs []*github.PullRequest, count *uint) int {
+	var prIndex int
+	for prIndex = 0; prIndex < len(prs); prIndex++ {
+		pr := prs[prIndex]
+		if !pr.Mergeable(cfg) {
+			prIndex--
+			break
+		}
+		if count != nil && (prIndex+1) == int(*count) {
+			break
+		}
+	}
+	if prIndex == len(prs) {
+		prIndex--
+	}
+	return prIndex
 }
 
 // StatusPullRequests fetches all the users pull requests from github and
