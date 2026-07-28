@@ -210,6 +210,48 @@ func TestMergeAllCascadeWaitsForFinalChecks(t *testing.T) {
 	})
 }
 
+func TestMergeAllBottomUpDisjoint(t *testing.T) {
+	t.Run("Sync: true", func(t *testing.T) {
+		s, gitmock, githubmock, _, output := makeTestObjects(t, true)
+		s.config.Repo.StackMergeMode = "mergeAll"
+		s.config.Repo.MergeMethod = "squash"
+		s.config.Repo.SquashGranularity = "perPR"
+		assert := require.New(t)
+		ctx := context.Background()
+
+		c1 := git.Commit{CommitID: "00000001", CommitHash: "c100000000000000000000000000000000000000", Subject: "test commit 1"}
+		c2 := git.Commit{CommitID: "00000002", CommitHash: "c200000000000000000000000000000000000000", Subject: "test commit 2"}
+		populateTwoPRs(t, s, gitmock, githubmock, output, c1, c2)
+
+		infoAfterC1 := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+			// c1 landed: only c2's PR remains open, no conflicts (disjoint stack)
+			PullRequests: []*github.PullRequest{githubmock.Info.PullRequests[1]},
+		}
+		infoEmpty := &github.GitHubInfo{
+			UserName:     githubmock.Info.UserName,
+			RepositoryID: githubmock.Info.RepositoryID,
+			LocalBranch:  githubmock.Info.LocalBranch,
+		}
+		githubmock.InfoQueue = []*github.GitHubInfo{githubmock.Info, infoAfterC1, infoEmpty}
+
+		githubmock.ExpectGetInfo()                  // iteration 1
+		githubmock.ExpectUpdatePullRequest(c2, nil) // retarget next BEFORE merging bottom
+		githubmock.ExpectMergePullRequestWithMessage(c1, genclient.PullRequestMergeMethod_SQUASH, "test commit 1")
+		githubmock.ExpectGetInfo() // iteration 2
+		githubmock.ExpectMergePullRequestWithMessage(c2, genclient.PullRequestMergeMethod_SQUASH, "test commit 2")
+		githubmock.ExpectGetInfo() // iteration 3: empty -> loop ends
+		s.MergePullRequests(ctx, nil)
+		lines := strings.Split(output.String(), "\n")
+		assert.Equal("MERGED   1 : test commit 1", lines[0])
+		assert.Equal("MERGED   1 : test commit 2", lines[1])
+		gitmock.ExpectationsMet()
+		githubmock.ExpectationsMet()
+	})
+}
+
 func TestMergeAllCascadeWaitTimeout(t *testing.T) {
 	t.Run("Sync: true", func(t *testing.T) {
 		s, gitmock, githubmock, _, output := makeTestObjects(t, true)

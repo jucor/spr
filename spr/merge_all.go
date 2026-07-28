@@ -19,6 +19,11 @@ func (sd *stackediff) mergeAll(ctx context.Context, count *uint) {
 	mergeMethod, err := sd.config.MergeMethod()
 	check(err)
 
+	if mergeMethod == genclient.PullRequestMergeMethod_SQUASH && sd.config.SquashPerPR() {
+		sd.bottomUpMerge(ctx, count)
+		return
+	}
+
 	githubInfo := sd.github.GetInfo(ctx, sd.gitcmd)
 	sd.runMergeCheckGate(githubInfo)
 	prIndex := topMergeableIndex(sd.config, githubInfo.PullRequests, count)
@@ -27,6 +32,49 @@ func (sd *stackediff) mergeAll(ctx context.Context, count *uint) {
 		return
 	}
 	sd.cascadeMerge(ctx, githubInfo, prIndex, mergeMethod)
+}
+
+// bottomUpMerge lands one squash commit per PR, bottom-up. The next PR is
+// retargeted to the trunk BEFORE each merge — lab-verified: waiting for
+// GitHub's deletion-triggered retargeting loses a race and closes the PR.
+// When a landing leaves the next PR conflicted (squash erased ancestry),
+// a restack (spr update flow) rebases the remaining branches.
+func (sd *stackediff) bottomUpMerge(ctx context.Context, count *uint) {
+	landed := 0
+	gateChecked := false
+	for {
+		info := sd.github.GetInfo(ctx, sd.gitcmd)
+		if !gateChecked {
+			sd.runMergeCheckGate(info)
+			gateChecked = true
+		}
+		open := info.PullRequests
+		if len(open) == 0 || (count != nil && landed >= int(*count)) {
+			return
+		}
+		bottom := open[0]
+		if !bottom.MergeStatus.NoConflicts {
+			// squash landed below erased ancestry; restack drops the landed
+			// commit (patch-id) and force-pushes the remaining branches.
+			sd.UpdatePullRequests(ctx, nil, nil)
+			continue
+		}
+		if !bottom.Mergeable(sd.config) {
+			bottom = sd.waitUntilMergeable(ctx, bottom.Commit.CommitID)
+		}
+		if len(open) > 1 {
+			next := open[1]
+			sd.github.UpdatePullRequest(ctx, sd.gitcmd, info, open, next, next.Commit, nil)
+		}
+		sd.github.MergePullRequest(ctx, bottom, genclient.PullRequestMergeMethod_SQUASH,
+			&github.MergeCommitMessage{Headline: bottom.Commit.Subject, Body: bottom.Commit.Body})
+		if sd.config.User.DeleteMergedBranches {
+			sd.deleteRemoteBranchBestEffort(ctx, bottom.FromBranch)
+		}
+		bottom.Merged = true
+		fmt.Fprintf(sd.output, "%s\n", bottom.String(sd.config))
+		landed++
+	}
 }
 
 // cascadeMerge merges top-down: each PR into the base branch it already
