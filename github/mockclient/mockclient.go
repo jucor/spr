@@ -107,12 +107,17 @@ func (c *MockClient) CommentPullRequest(ctx context.Context, pr *github.PullRequ
 }
 
 func (c *MockClient) MergePullRequest(ctx context.Context,
-	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod) {
+	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *github.MergeCommitMessage) {
 	fmt.Printf("HUB: MergePullRequest, method=%q\n", mergeMethod)
+	var headline string
+	if msg != nil {
+		headline = msg.Headline
+	}
 	c.verifyExpectation(expectation{
 		op:          mergePullRequestOP,
 		commit:      pr.Commit,
 		mergeMethod: mergeMethod,
+		msgHeadline: headline,
 	})
 }
 
@@ -195,6 +200,18 @@ func (c *MockClient) ExpectMergePullRequest(commit git.Commit, mergeMethod gencl
 	})
 }
 
+func (c *MockClient) ExpectMergePullRequestWithMessage(commit git.Commit,
+	mergeMethod genclient.PullRequestMergeMethod, msgHeadline string) {
+	c.expectMutex.Lock()
+	defer c.expectMutex.Unlock()
+	c.expect = append(c.expect, expectation{
+		op:          mergePullRequestOP,
+		commit:      commit,
+		mergeMethod: mergeMethod,
+		msgHeadline: msgHeadline,
+	})
+}
+
 func (c *MockClient) ExpectClosePullRequest(commit git.Commit) {
 	c.expectMutex.Lock()
 	defer c.expectMutex.Unlock()
@@ -258,5 +275,6 @@ type expectation struct {
 	commit      git.Commit
 	prev        *git.Commit
 	mergeMethod genclient.PullRequestMergeMethod
+	msgHeadline string
 	userIDs     []string
 }

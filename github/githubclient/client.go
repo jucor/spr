@@ -565,22 +565,32 @@ func (c *client) CommentPullRequest(ctx context.Context, pr *github.PullRequest,
 }
 
 func (c *client) MergePullRequest(ctx context.Context,
-	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod) {
+	pr *github.PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *github.MergeCommitMessage) {
 	log.Debug().
 		Interface("PR", pr).
 		Str("mergeMethod", string(mergeMethod)).
 		Msg("MergePullRequest")
 
+	var commitHeadline, commitBody *string
+	if msg != nil && mergeMethod != genclient.PullRequestMergeMethod_REBASE {
+		commitHeadline = &msg.Headline
+		commitBody = &msg.Body
+	}
+
 	var err error
 	if c.config.Repo.MergeQueue {
 		_, err = c.api.AutoMergePullRequest(ctx, genclient.EnablePullRequestAutoMergeInput{
-			PullRequestId: pr.ID,
-			MergeMethod:   &mergeMethod,
+			PullRequestId:  pr.ID,
+			MergeMethod:    &mergeMethod,
+			CommitHeadline: commitHeadline,
+			CommitBody:     commitBody,
 		})
 	} else {
 		_, err = c.api.MergePullRequest(ctx, genclient.MergePullRequestInput{
-			PullRequestId: pr.ID,
-			MergeMethod:   &mergeMethod,
+			PullRequestId:  pr.ID,
+			MergeMethod:    &mergeMethod,
+			CommitHeadline: commitHeadline,
+			CommitBody:     commitBody,
 		})
 	}
 	if err != nil {

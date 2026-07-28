@@ -7,6 +7,14 @@ import (
 	"github.com/ejoffe/spr/github/githubclient/gen/genclient"
 )
 
+// MergeCommitMessage overrides GitHub's default commit message when
+// merging a pull request. Nil keeps GitHub's default. Ignored for
+// REBASE merges (rebase creates no new commit message).
+type MergeCommitMessage struct {
+	Headline string
+	Body     string
+}
+
 type GitHubInterface interface {
 	// GetInfo returns the list of pull requests from GitHub which match the local stack of commits
 	GetInfo(ctx context.Context, gitcmd git.GitInterface) *GitHubInfo
@@ -27,7 +35,7 @@ type GitHubInterface interface {
 	CommentPullRequest(ctx context.Context, pr *PullRequest, comment string)
 
 	// MergePullRequest merged the given pull request
-	MergePullRequest(ctx context.Context, pr *PullRequest, mergeMethod genclient.PullRequestMergeMethod)
+	MergePullRequest(ctx context.Context, pr *PullRequest, mergeMethod genclient.PullRequestMergeMethod, msg *MergeCommitMessage)
 
 	// ClosePullRequest closes the given pull request
 	ClosePullRequest(ctx context.Context, pr *PullRequest)
